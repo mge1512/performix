@@ -30,6 +30,14 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from performance_quality import (
+    QUALITY_GOOD,
+    QUALITY_INDETERMINABLE,
+    MetricQuality,
+    recorded_performance_failures_for_attempt,
+    recorded_performance_metrics_for_attempt,
+)
+
 
 MODE_ORDER = ("rest", "hackathon_mcp", "performix_mcp")
 MODE_LABELS = {
@@ -81,17 +89,23 @@ def render_console_summary(
         no_color=not color,
         width=width,
     )
-    console.print(_rich_flat_table(_build_summary_table(attempts)))
+    console.print(
+        _rich_flat_table(_build_summary_table(attempts))
+    )
     return output.getvalue().strip("\n")
 
 
-def render_markdown_summary(attempts: list[dict[str, str]]) -> str:
+def render_markdown_summary(
+    attempts: list[dict[str, str]],
+) -> str:
     """Render an AI Insights summary as GitHub-flavoured Markdown."""
     summary = _build_summary_data(attempts)
     return _html_summary_table(summary.modes, summary.rows) + "\n"
 
 
-def _build_summary_table(attempts: list[dict[str, str]]) -> SummaryTable:
+def _build_summary_table(
+    attempts: list[dict[str, str]],
+) -> SummaryTable:
     summary = _build_summary_data(attempts)
     columns = [Column("testcase", "Testcase")]
     for mode in summary.modes:
@@ -99,7 +113,9 @@ def _build_summary_table(attempts: list[dict[str, str]]) -> SummaryTable:
     return SummaryTable(columns=columns, rows=summary.rows)
 
 
-def _build_summary_data(attempts: list[dict[str, str]]) -> SummaryRows:
+def _build_summary_data(
+    attempts: list[dict[str, str]],
+) -> SummaryRows:
     rows = _summary_rows(attempts)
     modes = _summary_modes(rows)
     return SummaryRows(
@@ -292,14 +308,25 @@ def _console_mode_label(mode: str, label: str) -> str:
     return label
 
 
-def _mode_row_cells(modes: list[str], mode_results: dict[str, list[dict[str, str]]]) -> dict[str, Cell]:
+def _mode_row_cells(
+    modes: list[str],
+    mode_results: dict[str, list[dict[str, str]]],
+) -> dict[str, Cell]:
     cells = {}
     for mode in modes:
-        cells.update(_format_mode_cells(mode, mode_results.get(mode, [])))
+        cells.update(
+            _format_mode_cells(
+                mode,
+                mode_results.get(mode, []),
+            )
+        )
     return cells
 
 
-def _format_mode_cells(mode: str, attempts: list[dict[str, str]]) -> dict[str, Cell]:
+def _format_mode_cells(
+    mode: str,
+    attempts: list[dict[str, str]],
+) -> dict[str, Cell]:
     if not attempts:
         return _empty_mode_cells(mode)
     attempts = sorted(attempts, key=_attempt_sort_key)
@@ -308,7 +335,9 @@ def _format_mode_cells(mode: str, attempts: list[dict[str, str]]) -> dict[str, C
         f"{mode}:runtime": Cell(_format_total_duration(attempts)),
     }
     if _is_mcp_mode_name(mode):
-        detail_lines = _format_mcp_detail_lines(attempts) or ["-"]
+        detail_lines = _format_mcp_detail_lines(
+            attempts,
+        ) or ["-"]
         cells[f"{mode}:details"] = Cell("", lines=tuple(detail_lines))
     return cells
 
@@ -350,45 +379,60 @@ def _summary_modes(rows: list[tuple[str, dict[str, list[dict[str, str]]]]]) -> l
     return [mode for mode in MODE_ORDER if mode in modes] + sorted(modes.difference(MODE_ORDER))
 
 
-def _format_result(attempts: list[dict[str, str]]) -> Cell:
-    total = len(attempts)
-    if total == 1:
-        status_text = _single_attempt_status_text(attempts[0])
-        status = _single_attempt_status(attempts[0])
+def _format_result(
+    attempts: list[dict[str, str]],
+) -> Cell:
+    results = [
+        _attempt_result(attempt)
+        for attempt in attempts
+    ]
+    if len(results) == 1:
+        status, status_text = results[0]
     else:
-        status_text = _multi_attempt_status_text(attempts)
-        status = _multi_attempt_status(attempts)
+        status, status_text = _multiple_attempt_result(attempts, results)
     confidence = _format_unique_property(attempts, "ai_judge_confidences")
     if confidence:
         return Cell(status_text, status=status, confidence=confidence)
     return Cell(status_text, status=status)
 
 
-def _multi_attempt_status_text(attempts: list[dict[str, str]]) -> str:
-    statuses = [_single_attempt_status(attempt) for attempt in attempts]
+def _attempt_result(
+    attempt: dict[str, str],
+) -> tuple[str, str]:
+    if recorded_performance_failures_for_attempt(attempt):
+        return "fail", "FAIL"
+    return _single_attempt_status(attempt), _single_attempt_status_text(attempt)
+
+
+def _multiple_attempt_result(
+    attempts: list[dict[str, str]],
+    results: list[tuple[str, str]],
+) -> tuple[str, str]:
+    statuses = [status for status, _ in results]
     if len(set(statuses)) == 1:
-        return statuses[0].upper()
-    return ", ".join(
-        f"attempt {_attempt_label(attempt, index)} {_single_attempt_status_text(attempt)}"
-        for index, attempt in enumerate(attempts, start=1)
-    )
+        return statuses[0], statuses[0].upper()
+
+    labelled_results = []
+    for index, (attempt, result) in enumerate(zip(attempts, results), start=1):
+        _, result_text = result
+        labelled_results.append(f"attempt {_attempt_label(attempt, index)} {result_text}")
+    return "fail", ", ".join(labelled_results)
 
 
-def _multi_attempt_status(attempts: list[dict[str, str]]) -> str:
-    statuses = [_single_attempt_status(attempt) for attempt in attempts]
-    if len(set(statuses)) == 1:
-        return statuses[0]
-    return "fail"
-
-
-def _format_mcp_detail_lines(attempts: list[dict[str, str]]) -> list[str]:
+def _format_mcp_detail_lines(
+    attempts: list[dict[str, str]],
+) -> list[str]:
     details_parts = [
         _format_token_usage(attempts),
         _format_mcp_calls(attempts),
     ]
     details = " ".join(part for part in details_parts if part and part != "-")
     truncation = _format_tool_output_truncation(attempts)
-    return [part for part in (details, truncation) if part]
+    lines = [details] if details else []
+    lines.extend(_format_performance_quality_lines(attempts))
+    if truncation:
+        lines.append(truncation)
+    return lines
 
 
 def _attempt_sort_key(attempt: dict[str, str]) -> int:
@@ -519,6 +563,46 @@ def _format_mcp_calls(attempts: list[dict[str, str]]) -> str:
     if calls == 0:
         return ""
     return f"calls={calls}"
+
+
+def _format_performance_quality_lines(
+    attempts: list[dict[str, str]],
+) -> list[str]:
+    lines = []
+    multiple_attempts = len(attempts) > 1
+    for index, attempt in enumerate(attempts, start=1):
+        metrics = recorded_performance_metrics_for_attempt(attempt)
+        if not metrics:
+            continue
+        failed_metrics = [metric for metric in metrics if metric.quality != QUALITY_GOOD]
+        if not failed_metrics:
+            continue
+        attempt_label = _attempt_label(attempt, index)
+        suffix = f" (attempt {attempt_label})" if multiple_attempts else ""
+        lines.append(f"❌ Error{suffix}: {_format_quality_metrics(failed_metrics)}")
+    return lines
+
+
+def _format_quality_metrics(metrics: list[MetricQuality]) -> str:
+    return "; ".join(_format_quality_metric(metric) for metric in metrics)
+
+
+def _format_quality_metric(metric: MetricQuality) -> str:
+    if metric.quality == QUALITY_INDETERMINABLE:
+        return f"{metric.label} indeterminate"
+    comparator = "<=" if metric.quality == QUALITY_GOOD else ">"
+    return (
+        f"{metric.label} {_format_metric_value(metric.key, metric.value)} "
+        f"{comparator} {_format_metric_value(metric.key, metric.threshold)}"
+    )
+
+
+def _format_metric_value(metric_key: str, value: int | float | None) -> str:
+    if value is None:
+        return "unknown"
+    if metric_key == "duration_seconds":
+        return _format_duration_seconds(float(value))
+    return _format_int(int(value))
 
 
 def _format_tool_output_truncation(attempts: list[dict[str, str]]) -> str:

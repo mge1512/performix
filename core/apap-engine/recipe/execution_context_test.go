@@ -29,6 +29,37 @@ func TestRunExecutionContext_TargetInfo_NilSupplier(t *testing.T) {
 	require.Nil(t, ctx.TargetInfo())
 }
 
+func TestRunExecutionContextCopyFileRejectsUnsupportedLocalities(t *testing.T) {
+	tests := []struct {
+		name                string
+		sourceLocality      string
+		destinationLocality string
+		wantError           string
+	}{
+		{name: "host to host", sourceLocality: "host", destinationLocality: "host", wantError: `unsupported source locality "host"`},
+		{name: "target to target", sourceLocality: "target", destinationLocality: "target", wantError: `unsupported destination locality "target"`},
+		{name: "host to target", sourceLocality: "host", destinationLocality: "target", wantError: `unsupported source locality "host"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &RunExecutionContext{}
+			err := ctx.copyFile(tt.sourceLocality, tt.destinationLocality, "/remote/file", "/local/file")
+			require.ErrorContains(t, err, tt.wantError)
+		})
+	}
+}
+
+func TestRunExecutionContextCopyFileRequiresTransferManager(t *testing.T) {
+	ctx := &RunExecutionContext{
+		Collector: &Collector{FileRetriever: &RetrieveAgentFilesStageRetriever{}},
+	}
+
+	err := ctx.copyFile("target", "host", "/remote/file", "/local/file")
+
+	require.ErrorContains(t, err, "copyFrom requires APXD_ENABLE_TRANSFER_MANAGER=true")
+}
+
 func TestCollectMonitorTargets(t *testing.T) {
 	intCtxs := []tool.IntegrationContext{
 		{Workload: &tool.WorkloadAttach{PID: 123}},

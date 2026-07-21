@@ -17,9 +17,12 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	targetservice "github.com/Arm-Debug/apap-cli/apap-cli/service/target"
+	"github.com/Arm-Debug/apap-cli/apap-engine/grpcserver"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipeparser"
 	"github.com/Arm-Debug/apap-cli/clients/go/apapproto"
@@ -120,7 +123,7 @@ func bundledRecipeNames(t *testing.T) []string {
 	for _, recipeFile := range recipeFiles {
 		contents, err := os.ReadFile(recipeFile)
 		require.NoError(t, err)
-		parsedRecipe, err := parser.ParseRecipe(string(contents))
+		parsedRecipe, err := parser.ParseRecipe(recipeFile, string(contents))
 		require.NoError(t, err, "parse %s", recipeFile)
 		names = append(names, parsedRecipe.Name)
 	}
@@ -459,141 +462,6 @@ func TestRunRecipeTool(t *testing.T) {
 		targets.AssertExpectations(t)
 	})
 
-	t.Run("forwards recipe parameters", func(t *testing.T) {
-		ctx := context.Background()
-		targets := &targetservice.MockTargetManager{}
-		expectTarget(targets, "myhost", "10.0.0.1")
-
-		var issuedCmd *apapproto.RecipeCommand
-		engine := apapprotomocks.NewApapClient(t)
-		expectAvailableRecipes(engine, "code_hotspots")
-		engine.On("TargetPrepare", mock.Anything, mock.Anything).
-			Return(&apapproto.TargetPrepareResponse{Result: apapproto.TargetPrepareResult_DEPLOYED}, nil).Once()
-		engine.On("RecipeValidateParameters", mock.Anything, mock.Anything).
-			Return(&apapproto.RecipeValidateParametersResponse{}, nil).Once()
-		engine.On("RecipeIssueCommand", mock.Anything, mock.Anything).
-			Run(func(args mock.Arguments) { issuedCmd = args.Get(1).(*apapproto.RecipeCommand) }).
-			Return(recipeStream(
-				runStartResponse("run-params"),
-				runFinishResponse(apapproto.StatusCode_SUCCESS, nil),
-			), nil).Once()
-
-		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine, Targets: targets}, RunRecipeTool{}.Register)
-		defer clientSession.Close()
-		defer serverSession.Close()
-
-		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
-			Name: "run_recipe",
-			Arguments: map[string]any{
-				"recipe":     "code_hotspots",
-				"target":     "myhost",
-				"system":     map[string]any{},
-				"parameters": map[string]any{"collect_java_stacks": true, "sample_period": "1000"},
-			},
-		})
-
-		require.NoError(t, err)
-		require.False(t, result.IsError)
-
-		require.NotNil(t, issuedCmd)
-		params := issuedCmd.GetStartCommand().GetParameters()
-		require.Contains(t, params, "collect_java_stacks")
-		assert.True(t, params["collect_java_stacks"].GetBoolValue())
-		assert.Equal(t, "1000", params["sample_period"].GetStringValue())
-
-		targets.AssertExpectations(t)
-	})
-
-	t.Run("reports invalid recipe parameters", func(t *testing.T) {
-		ctx := context.Background()
-		targets := &targetservice.MockTargetManager{}
-		expectTarget(targets, "myhost", "10.0.0.1")
-
-		engine := apapprotomocks.NewApapClient(t)
-		expectAvailableRecipes(engine, "code_hotspots")
-		engine.On("TargetPrepare", mock.Anything, mock.Anything).
-			Return(&apapproto.TargetPrepareResponse{Result: apapproto.TargetPrepareResult_DEPLOYED}, nil).Once()
-		engine.On("RecipeValidateParameters", mock.Anything, mock.Anything).
-			Return(&apapproto.RecipeValidateParametersResponse{
-				Messages: []*apapproto.ParameterValidationResult{
-					{
-						ParameterId: "collect_java_stacks",
-						Message:     &apapproto.ErrorChain{Root: &apapproto.ErrorNode{Error: "must be a boolean"}},
-					},
-				},
-			}, nil).Once()
-
-		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine, Targets: targets}, RunRecipeTool{}.Register)
-		defer clientSession.Close()
-		defer serverSession.Close()
-
-		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
-			Name: "run_recipe",
-			Arguments: map[string]any{
-				"recipe":     "code_hotspots",
-				"target":     "myhost",
-				"system":     map[string]any{},
-				"parameters": map[string]any{"collect_java_stacks": "notabool"},
-			},
-		})
-
-		require.NoError(t, err)
-		require.True(t, result.IsError)
-		decoded := decodeRunRecipeResult(t, result)
-		assert.Equal(t, "error", decoded.Status)
-		require.NotNil(t, decoded.Error)
-		assert.Contains(t, decoded.Error.Message, "collect_java_stacks")
-		assert.Contains(t, decoded.Error.Message, "must be a boolean")
-
-		engine.AssertNotCalled(t, "RecipeIssueCommand", mock.Anything, mock.Anything)
-		targets.AssertExpectations(t)
-	})
-
-	t.Run("surfaces catalog detail for an unknown recipe parameter", func(t *testing.T) {
-		ctx := context.Background()
-		targets := &targetservice.MockTargetManager{}
-		expectTarget(targets, "myhost", "10.0.0.1")
-
-		engine := apapprotomocks.NewApapClient(t)
-		expectAvailableRecipes(engine, "code_hotspots")
-		engine.On("TargetPrepare", mock.Anything, mock.Anything).
-			Return(&apapproto.TargetPrepareResponse{Result: apapproto.TargetPrepareResult_DEPLOYED}, nil).Once()
-		// The engine rejects an unknown parameter name as a catalog-coded error rather
-		// than as a per-parameter validation message. The MCP result should retain
-		// the catalog fields so the client can reason from the code, explanation and
-		// advice without a separate MCP-specific kind.
-		engine.On("RecipeValidateParameters", mock.Anything, mock.Anything).
-			Return(nil, message.New(message.EngineParametersInvalidParam)).Once()
-
-		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine, Targets: targets}, RunRecipeTool{}.Register)
-		defer clientSession.Close()
-		defer serverSession.Close()
-
-		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
-			Name: "run_recipe",
-			Arguments: map[string]any{
-				"recipe":     "code_hotspots",
-				"target":     "myhost",
-				"system":     map[string]any{},
-				"parameters": map[string]any{"bogus_param": true},
-			},
-		})
-
-		require.NoError(t, err)
-		require.True(t, result.IsError)
-		decoded := decodeRunRecipeResult(t, result)
-		assert.Equal(t, "error", decoded.Status)
-		require.NotNil(t, decoded.Error)
-		assert.Equal(t, message.EngineParametersInvalidParam, decoded.Error.Code)
-		assert.Equal(t, string(message.SeverityError), decoded.Error.Severity)
-		assert.NotEmpty(t, decoded.Error.Message)
-		assert.NotEmpty(t, decoded.Error.Explanation)
-		assert.NotEmpty(t, decoded.Error.Advice)
-
-		engine.AssertNotCalled(t, "RecipeIssueCommand", mock.Anything, mock.Anything)
-		targets.AssertExpectations(t)
-	})
-
 	t.Run("reports a target preparation failure", func(t *testing.T) {
 		ctx := context.Background()
 		targets := &targetservice.MockTargetManager{}
@@ -838,4 +706,232 @@ func TestBuildRecipeWorkloadAndroidLaunch(t *testing.T) {
 	require.NotNil(t, android)
 	assert.Equal(t, "com.example.app", android.PackageName)
 	assert.Equal(t, ".MainActivity", android.ActivityName)
+}
+
+// TestRunRecipeToolParameters checks how run_recipe passes recipe-specific parameters to
+// the engine. The MCP server does not interpret parameter names, and existing
+// recipe-specific tests cover testing the specific parameter each recipe supports.
+// As such, these tests cover JSON-to-protobuf conversion (MCP to Apap gRPC service),
+// when validation is called, and how validation errors are reported.
+func TestRunRecipeToolParameters(t *testing.T) {
+	assertJSONParameterValues := func(params map[string]*structpb.Value) {
+		t.Helper()
+
+		require.Contains(t, params, "string_param")
+		assert.Equal(t, "normal", params["string_param"].GetStringValue())
+		require.Contains(t, params, "bool_param")
+		assert.True(t, params["bool_param"].GetBoolValue())
+		require.Contains(t, params, "number_param")
+		assert.InEpsilon(t, 0.25, params["number_param"].GetNumberValue(), 0.0001)
+
+		require.Contains(t, params, "array_param")
+		array := params["array_param"].GetListValue()
+		require.NotNil(t, array)
+		require.Len(t, array.Values, 2)
+		assert.Equal(t, "frontend_bound", array.Values[0].GetStringValue())
+		assert.Equal(t, "backend_bound", array.Values[1].GetStringValue())
+
+		require.Contains(t, params, "object_param")
+		object := params["object_param"].GetStructValue()
+		require.NotNil(t, object)
+		require.Contains(t, object.Fields, "nested")
+		assert.Equal(t, "value", object.Fields["nested"].GetStringValue())
+
+		require.Contains(t, params, "null_param")
+		assert.True(t, proto.Equal(structpb.NewNullValue(), params["null_param"]))
+	}
+
+	t.Run("forwards JSON values as protobuf values", func(t *testing.T) {
+		ctx := context.Background()
+		targets := &targetservice.MockTargetManager{}
+		target := newTestTarget("10.0.0.1")
+		targets.On("GetTarget", "myhost").Return(target, nil).Once()
+		expectedProtoTarget := grpcserver.TargetToProto(target)
+
+		var issuedCmd *apapproto.RecipeCommand
+		engine := apapprotomocks.NewApapClient(t)
+		expectAvailableRecipes(engine, "code_hotspots")
+		engine.On("TargetPrepare", mock.Anything, mock.Anything).
+			Return(&apapproto.TargetPrepareResponse{Result: apapproto.TargetPrepareResult_DEPLOYED}, nil).Once()
+		engine.On("RecipeValidateParameters", mock.Anything, mock.Anything).
+			Run(func(args mock.Arguments) {
+				req := args.Get(1).(*apapproto.RecipeValidateParametersRequest)
+				assert.Equal(t, "code_hotspots", req.GetRecipeName())
+				require.NotNil(t, req.TargetName)
+				assert.Equal(t, "myhost", req.GetTargetName())
+				assert.True(t, proto.Equal(expectedProtoTarget, req.GetTarget()))
+				assert.NotNil(t, req.GetWorkload().GetSystemWideWorkload())
+				assertJSONParameterValues(req.GetParameters())
+			}).
+			Return(&apapproto.RecipeValidateParametersResponse{}, nil).Once()
+		engine.On("RecipeIssueCommand", mock.Anything, mock.Anything).
+			Run(func(args mock.Arguments) { issuedCmd = args.Get(1).(*apapproto.RecipeCommand) }).
+			Return(recipeStream(
+				runStartResponse("run-params"),
+				runFinishResponse(apapproto.StatusCode_SUCCESS, nil),
+			), nil).Once()
+
+		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine, Targets: targets}, RunRecipeTool{}.Register)
+		defer clientSession.Close()
+		defer serverSession.Close()
+
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name: "run_recipe",
+			Arguments: map[string]any{
+				"recipe": "code_hotspots",
+				"target": "myhost",
+				"system": map[string]any{},
+				"parameters": map[string]any{
+					"array_param":  []any{"frontend_bound", "backend_bound"},
+					"bool_param":   true,
+					"null_param":   nil,
+					"number_param": 0.25,
+					"object_param": map[string]any{"nested": "value"},
+					"string_param": "normal",
+				},
+			},
+		})
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		require.NotNil(t, issuedCmd)
+		startCommand := issuedCmd.GetStartCommand()
+		require.NotNil(t, startCommand)
+		assert.Equal(t, "code_hotspots", startCommand.GetName())
+		require.NotNil(t, startCommand.TargetName)
+		assert.Equal(t, "myhost", startCommand.GetTargetName())
+		assert.True(t, proto.Equal(expectedProtoTarget, startCommand.GetTarget()))
+		assert.NotNil(t, startCommand.GetWorkload().GetSystemWideWorkload())
+		assertJSONParameterValues(startCommand.GetParameters())
+
+		targets.AssertExpectations(t)
+	})
+
+	t.Run("skips validation when parameters are omitted", func(t *testing.T) {
+		ctx := context.Background()
+		targets := &targetservice.MockTargetManager{}
+		expectTarget(targets, "myhost", "10.0.0.1")
+
+		engine := apapprotomocks.NewApapClient(t)
+		expectAvailableRecipes(engine, "code_hotspots")
+		engine.On("TargetPrepare", mock.Anything, mock.Anything).
+			Return(&apapproto.TargetPrepareResponse{Result: apapproto.TargetPrepareResult_DEPLOYED}, nil).Once()
+		engine.On("RecipeIssueCommand", mock.Anything, mock.Anything).
+			Return(recipeStream(
+				runStartResponse("run-no-params"),
+				runFinishResponse(apapproto.StatusCode_SUCCESS, nil),
+			), nil).Once()
+
+		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine, Targets: targets}, RunRecipeTool{}.Register)
+		defer clientSession.Close()
+		defer serverSession.Close()
+
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "run_recipe",
+			Arguments: map[string]any{"recipe": "code_hotspots", "target": "myhost", "system": map[string]any{}},
+		})
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		engine.AssertNotCalled(t, "RecipeValidateParameters", mock.Anything, mock.Anything)
+		targets.AssertExpectations(t)
+	})
+
+	t.Run("rejects values that cannot be represented as protobuf values", func(t *testing.T) {
+		_, err := recipeParameters(map[string]any{"unsupported": complex(1, 2)})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `invalid value for recipe parameter "unsupported"`)
+	})
+
+	t.Run("reports invalid recipe parameters", func(t *testing.T) {
+		ctx := context.Background()
+		targets := &targetservice.MockTargetManager{}
+		expectTarget(targets, "myhost", "10.0.0.1")
+
+		engine := apapprotomocks.NewApapClient(t)
+		expectAvailableRecipes(engine, "code_hotspots")
+		engine.On("TargetPrepare", mock.Anything, mock.Anything).
+			Return(&apapproto.TargetPrepareResponse{Result: apapproto.TargetPrepareResult_DEPLOYED}, nil).Once()
+		engine.On("RecipeValidateParameters", mock.Anything, mock.Anything).
+			Return(&apapproto.RecipeValidateParametersResponse{
+				Messages: []*apapproto.ParameterValidationResult{
+					{
+						ParameterId: "collect_java_stacks",
+						Message:     &apapproto.ErrorChain{Root: &apapproto.ErrorNode{Error: "must be a boolean"}},
+					},
+				},
+			}, nil).Once()
+
+		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine, Targets: targets}, RunRecipeTool{}.Register)
+		defer clientSession.Close()
+		defer serverSession.Close()
+
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name: "run_recipe",
+			Arguments: map[string]any{
+				"recipe":     "code_hotspots",
+				"target":     "myhost",
+				"system":     map[string]any{},
+				"parameters": map[string]any{"collect_java_stacks": "notabool"},
+			},
+		})
+
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		decoded := decodeRunRecipeResult(t, result)
+		assert.Equal(t, "error", decoded.Status)
+		require.NotNil(t, decoded.Error)
+		assert.Contains(t, decoded.Error.Message, "collect_java_stacks")
+		assert.Contains(t, decoded.Error.Message, "must be a boolean")
+
+		engine.AssertNotCalled(t, "RecipeIssueCommand", mock.Anything, mock.Anything)
+		targets.AssertExpectations(t)
+	})
+
+	t.Run("surfaces catalog detail for an unknown recipe parameter", func(t *testing.T) {
+		ctx := context.Background()
+		targets := &targetservice.MockTargetManager{}
+		expectTarget(targets, "myhost", "10.0.0.1")
+
+		engine := apapprotomocks.NewApapClient(t)
+		expectAvailableRecipes(engine, "code_hotspots")
+		engine.On("TargetPrepare", mock.Anything, mock.Anything).
+			Return(&apapproto.TargetPrepareResponse{Result: apapproto.TargetPrepareResult_DEPLOYED}, nil).Once()
+		// The engine rejects an unknown parameter name as a catalog-coded error rather
+		// than as a per-parameter validation message. The MCP result should retain
+		// the catalog fields so the client can reason from the code, explanation and
+		// advice without a separate MCP-specific kind.
+		engine.On("RecipeValidateParameters", mock.Anything, mock.Anything).
+			Return(nil, message.New(message.EngineParametersInvalidParam)).Once()
+
+		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine, Targets: targets}, RunRecipeTool{}.Register)
+		defer clientSession.Close()
+		defer serverSession.Close()
+
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name: "run_recipe",
+			Arguments: map[string]any{
+				"recipe":     "code_hotspots",
+				"target":     "myhost",
+				"system":     map[string]any{},
+				"parameters": map[string]any{"bogus_param": true},
+			},
+		})
+
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		decoded := decodeRunRecipeResult(t, result)
+		assert.Equal(t, "error", decoded.Status)
+		require.NotNil(t, decoded.Error)
+		assert.Equal(t, message.EngineParametersInvalidParam, decoded.Error.Code)
+		assert.Equal(t, string(message.SeverityError), decoded.Error.Severity)
+		assert.NotEmpty(t, decoded.Error.Message)
+		assert.NotEmpty(t, decoded.Error.Explanation)
+		assert.NotEmpty(t, decoded.Error.Advice)
+
+		engine.AssertNotCalled(t, "RecipeIssueCommand", mock.Anything, mock.Anything)
+		targets.AssertExpectations(t)
+	})
 }

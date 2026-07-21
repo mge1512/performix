@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 HEADER_FILE_NAME = "copyright-license-header.txt"
 TEMPLATE_NAME = "compact-spdx"
 HEADER_FILE = REPO_ROOT / HEADER_FILE_NAME

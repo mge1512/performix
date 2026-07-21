@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Terminology & Core Concepts
 
-Arm Performix is a performance analysis toolkit for profiling an application and turning captured performance data into actionable insights. Through MCP, you can manage targets, run recipes against workloads, and analyze existing runs without requiring the user to switch to the CLI or GUI. Prefer accessing Performix via the MCP server wherever the relevant functionality is exposed via MCP.
+Arm Performix is a performance analysis toolkit for profiling an application and turning captured performance data into actionable insights. Through MCP, you can manage targets, run recipes against workloads, inspect existing runs, and generate Dynamic Insights for supported runs without requiring the user to switch to the CLI or GUI. Prefer accessing Performix via the MCP server wherever the relevant functionality is exposed via MCP.
 
 | Term | Definition |
 | --- | --- |
@@ -21,7 +21,7 @@ Arm Performix is a performance analysis toolkit for profiling an application and
 This MCP server exposes Performix functionality, with the following overall goals:
 1. Managing the set of targets available to Performix
 2. Enabling users to generate new Performix runs against their application directly via the MCP — see the [Recipe Run Playbook](#recipe-run-playbook) section below.
-3. Providing users with AI-generated insights into their application's performance, based on profiling data from a Performix run (which may have originated from the MCP, CLI or GUI).
+3. Providing users with Dynamic Insights into their application's performance, based on supported Performix runs which may have originated from the MCP, CLI or GUI.
 
 
 ## Recipe Run Playbook
@@ -34,22 +34,22 @@ Take into account the following:
 
 
 ### Choosing a Recipe
-Default to `code_hotspots` when a user asks to profile a workload without naming a recipe.
+Choose the recipe that best matches the user's profiling goal. Default to `code_hotspots` only for general CPU profiling, or when the user requests Dynamic Insights without specifying a more suitable type of measurement. Do not prefer `code_hotspots` solely because it supports Dynamic Insights when another recipe better matches the user's request.
 
 Use the `list_recipes` tool to check which recipes are currently available. Recipe availability is controlled by the engine recipe catalogue and configuration, so a recipe that is disabled or failed to load will not be runnable via MCP.
 
-Use the `recipe_info` tool before running a recipe, when you need to understand recipe-specific parameters, or when the target may affect valid parameter choices. If you already know the target, pass it to `recipe_info` so target compatibility with this recipe can be validated.
+After choosing a recipe, use the `recipe_info` tool before `run_recipe` to inspect its parameters, status, MCP guidance and target support. If you already know the target, pass it to `recipe_info` so target compatibility and target-specific parameter choices can be validated. Follow any returned `mcp_guidance` when choosing parameters and a timeout.
 
-Usage guidance for various recipes is provided below.
+The following table provides guidance for common recipes. It is not an exhaustive catalogue; use `list_recipes` to discover the recipes that are currently available.
 
 | Recipe | Usage guidance |
 | --- | --- |
-| `code_hotspots` | Use this as the default general-purpose profiling recipe. It is the fastest way to answer "what code is spending CPU time?" for a workload run. |
-| `cpu_microarchitecture` | Use this after hotspots when the next question is why the hot code is underperforming at the microarchitectural level. |
+| `system_utilization` | Use this as the default for system-level profiling when the user has not identified a more specific measurement goal. It shows how CPU, memory, disk and network resources are used over time, helping identify saturated resources and correlate workload behaviour with broader system activity. |
+| `code_hotspots` | Use this as the default for general CPU profiling when the user has not identified a more specific measurement goal. It is the fastest way to answer "what code is spending CPU time?" and is currently the only recipe that supports Dynamic Insights. |
+| `cpu_microarchitecture` | Use this when the user wants to understand microarchitectural bottlenecks. It is often a useful follow-up when hot code is underperforming. |
 | `memory_access` | Use this when the workload looks memory-bound or when code hotspots suggest cache or latency issues. |
 | `instruction_mix` | Use this when you need a breakdown of instruction categories, compiler output, or ISA usage. |
 | `asct` | Use this for Arm system characterization scenarios rather than as a first-pass workload profiling recipe. |
-| `system_utilization` | Use this to see how CPU, memory, disk, and network resources are utilized while the workload runs. It may help you find saturated system resources, understand utilization trends over time, and correlate workload behavior with broader system activity. |
 | `cache_sharing` | Use this when you need to understand cache line sharing, cache-to-cache transfers, or false-sharing style effects. |
 | `cmn_analysis` | Use this for CMN mesh and interconnect analysis rather than as a first-pass workload profiling recipe. |
 | `syscall_trace_summary` | Use this when syscall tracing data is needed to summarize operating system call behaviour during a workload run. |
@@ -63,8 +63,10 @@ New targets can be added directly via MCP using the `add_target` tool, or altern
 
 ### Workloads & Running a Recipe
 You can run a recipe live using the `run_recipe` tool, which generates a new run and returns the run's ID among other relevant details.
-For initial profiling runs, omit the timeout to use the MCP default of 10 seconds unless the user asks for a longer collection. Set timeout to 0 only when the user explicitly wants no collection timeout.
+Unless `recipe_info` returns different MCP guidance, omit the timeout for initial profiling runs to use the MCP default of 10 seconds. Use a longer timeout when the user or the recipe guidance requires it. Set timeout to 0 only when the user explicitly wants no collection timeout.
 
 
 ### Generating Insights
-Use the `generate_ai_insights` tool to retrieve key data from a run to help you generate performance analysis.
+Dynamic Insights are available only for successful runs produced by a supported recipe, currently `code_hotspots`. This limitation applies to Dynamic Insights, not to `run_recipe`; continue to use other recipes when they better match the user's profiling goal.
+
+Use `list_runs` to find a suitable existing successful run when the user has not supplied a run ID. Call `generate_ai_insights` with that run ID. If any returned payload is incomplete, use its bundle ID, payload name and `next_offset` with `read_ai_insights_payload_details`, repeating as needed until the relevant evidence is complete.

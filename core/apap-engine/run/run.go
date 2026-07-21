@@ -533,7 +533,7 @@ func (c *RunCollection) CreateEntityDirs(builder RunBuilder) error {
 		entryPath := filepath.Join(newEntryDir, builder.entities[i].RelativePath)
 		err := os.MkdirAll(entryPath, perms.LocalDirPerm)
 		if err != nil {
-			return fmt.Errorf("failed to create entity dir for run")
+			return fmt.Errorf("failed to create entity dir for run: %w", err)
 		}
 	}
 	return nil

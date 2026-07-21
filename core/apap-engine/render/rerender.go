@@ -162,8 +162,11 @@ func (fs *SessionRenderFSImpl) emitOutputForRunGlob(
 
 	// Resolve the glob pattern to an absolute path rooted in the temp directory.
 	pattern := filePath
+	remapBase := filePath
+	remapRelativeToTempDir := false
 	if !filepath.IsAbs(pattern) && filepath.VolumeName(pattern) == "" {
 		pattern = filepath.Join(tempDir, filepath.FromSlash(pattern))
+		remapRelativeToTempDir = true
 	}
 
 	// Expand the glob and ensure at least one match exists.
@@ -177,7 +180,15 @@ func (fs *SessionRenderFSImpl) emitOutputForRunGlob(
 
 	// Move each matched file into the render overlay using a remapped destination path.
 	for _, match := range matches {
-		destRelPath, err := util.RemapGlobbedPath(rendererRelPath, match, pattern)
+		remapMatch := match
+		if remapRelativeToTempDir {
+			remapMatch, err = filepath.Rel(tempDir, match)
+			if err != nil {
+				return err
+			}
+		}
+
+		destRelPath, err := util.RemapGlobbedPath(rendererRelPath, remapMatch, remapBase)
 		if err != nil {
 			return err
 		}

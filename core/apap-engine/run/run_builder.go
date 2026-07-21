@@ -71,6 +71,9 @@ func (b *RunBuilder) AddEntity(relativePath string) {
 	dirs := strings.Split(relativePath, "/")
 	var dirPath string
 	for d := range len(dirs) {
+		if strings.ContainsAny(dirs[d], "*?[") {
+			break
+		}
 		dirPath = filepath.Join(dirPath, dirs[d])
 		if !b.ContainsEntity(dirPath) {
 			b.entities = append(b.entities, cdf.Entity{RelativePath: cdf.NormalizePath(dirPath)})

@@ -92,7 +92,7 @@ func (renderer *SlAnalyzeRenderer) Initialize(session render.Session, _ map[stri
 	// If capture.apc directory is not present, skip initialization as well since there's nothing to analyze.
 	hasCapture := false
 	for _, entry := range session.Content().Entries {
-		_, err := entry.Model.ResolveComponent(filepath.Join(renderer.getEntity(), "capture.apc/*"))
+		_, err := renderer.resolveCaptureRoot(entry.Model)
 		if err == nil || errors.Is(err, cdf.ErrComponentPending) {
 			hasCapture = true
 			break
@@ -111,7 +111,7 @@ func (renderer *SlAnalyzeRenderer) Initialize(session render.Session, _ map[stri
 	pending := false
 	for _, entry := range session.Content().Entries {
 		// Resolve capture.apc directory for the run.
-		captureDir, err := entry.Model.ResolveComponent(filepath.Join(renderer.getEntity(), "capture.apc/*"))
+		captureDir, err := renderer.resolveCaptureRoot(entry.Model)
 		if errors.Is(err, cdf.ErrComponentPending) {
 			pending = true
 			// Add pending entries to the render manifest
@@ -137,7 +137,7 @@ func (renderer *SlAnalyzeRenderer) Initialize(session render.Session, _ map[stri
 		}
 
 		// Run sl-analyze and place outputs in the temp render directory.
-		args := renderer.buildSlAnalyzeArgs(slAnalyzePath, tempDir, filepath.Dir(captureDir.AbsolutePath))
+		args := renderer.buildSlAnalyzeArgs(slAnalyzePath, tempDir, captureDir)
 		if err := runSlAnalyze(args); err != nil {
 			return err
 		}
@@ -161,6 +161,16 @@ func (renderer *SlAnalyzeRenderer) getEntity() string {
 		return "tool/neoprof/0/"
 	}
 	return entity
+}
+
+func (renderer *SlAnalyzeRenderer) resolveCaptureRoot(model cdf.ModelView) (string, error) {
+	component, err := model.ResolveComponent(path.Join(renderer.getEntity(), "capture.apc", "**", "*"))
+	if err != nil {
+		return "", err
+	}
+
+	absolutePath := filepath.ToSlash(filepath.Clean(component.AbsolutePath))
+	return filepath.FromSlash(strings.TrimSuffix(absolutePath, "/**/*")), nil
 }
 
 // buildSlAnalyzeArgs builds the sl-analyze command line arguments.

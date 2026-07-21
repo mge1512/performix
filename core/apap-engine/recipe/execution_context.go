@@ -242,6 +242,7 @@ func (c *RunExecutionContext) newEngineLocalities(runCtx context.Context, preser
 	sharedExecCtx, cancelSharedExec := context.WithCancelCause(runCtx)
 
 	targetLocality, targetCleanup := c.newEngineLocality(
+		tool.LocalityTarget,
 		sharedExecCtx,
 		cancelSharedExec,
 		agentConn,
@@ -271,6 +272,7 @@ func (c *RunExecutionContext) newEngineLocalities(runCtx context.Context, preser
 			}
 
 			hostLocality, hostCleanup := c.newEngineLocality(
+				tool.LocalityHost,
 				sharedExecCtx,
 				cancelSharedExec,
 				agentConn,
@@ -290,6 +292,7 @@ func (c *RunExecutionContext) newEngineLocalities(runCtx context.Context, preser
 
 // newEngineLocality creates an engine locality bound to sharedExecCtx.
 func (c *RunExecutionContext) newEngineLocality(
+	localityName string,
 	sharedExecCtx context.Context,
 	cancelSharedExec context.CancelCauseFunc,
 	agentConn *agent.AgentConn,
@@ -315,14 +318,42 @@ func (c *RunExecutionContext) newEngineLocality(
 	)
 
 	return tool.EngineLocality{
-			Engine:        engine,
-			FileCollector: NewRecipeFileCollector(c.Collector, *targetPlatform, func() *agent.AgentConn { return agentConn }),
-			ToolsRoot:     toolsRoot,
+			Name:   localityName,
+			Engine: engine,
+			FileCollector: NewRecipeFileCollector(
+				c.Collector,
+				*targetPlatform,
+				func() *agent.AgentConn { return agentConn },
+			),
+			ToolsRoot: toolsRoot,
+			CopyFrom: func(sourceLocality string, sourcePath string, destinationPath string) error {
+				return c.copyFile(sourceLocality, localityName, sourcePath, destinationPath)
+			},
 		}, func() {
 			engineCleanup()
 			cancelAgentCleanup(nil)
 			stop()
 		}
+}
+
+func (c *RunExecutionContext) copyFile(sourceLocality string, destinationLocality string, sourcePath string, destinationPath string) error {
+	if sourceLocality != tool.LocalityTarget {
+		return fmt.Errorf("unsupported source locality %q", sourceLocality)
+	}
+	if destinationLocality != tool.LocalityHost {
+		return fmt.Errorf("unsupported destination locality %q", destinationLocality)
+	}
+
+	retriever, ok := c.Collector.FileRetriever.(*TransferManagerRetriever)
+	if !ok {
+		return fmt.Errorf("copyFrom requires APXD_ENABLE_TRANSFER_MANAGER=true")
+	}
+
+	sourcePath = c.TargetPlatform().Path.GetFullPath(sourcePath, "")
+	return retriever.TransferManager.CopyFromTargetAndWait(conductor.FileTransfer{
+		RemotePath: sourcePath,
+		LocalPath:  destinationPath,
+	}, c.AgentSupplier)
 }
 
 // Structure holding the set of workload targets to monitor for liveness.

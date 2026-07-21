@@ -12,13 +12,38 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
 	"github.com/Arm-Debug/apap-cli/apap-engine/render"
 	"github.com/Arm-Debug/apap-cli/apap-engine/run"
+	"github.com/Arm-Debug/apap-cli/apap-engine/targetsession"
 )
 
 // mockRenderFS is a SessionRenderFS backed by testify.Mock.
 type mockRenderFS struct {
 	mock.Mock
+}
+
+type slAnalyzeTestSession struct {
+	content  *render.ContentMap
+	manifest *render.Manifest
+	rerender render.SessionRenderFS
+}
+
+func (s *slAnalyzeTestSession) ID() string                  { return "session-sl-analyze" }
+func (s *slAnalyzeTestSession) DatabaseKey() string         { return "" }
+func (s *slAnalyzeTestSession) Close()                      {}
+func (s *slAnalyzeTestSession) Content() *render.ContentMap { return s.content }
+func (s *slAnalyzeTestSession) Manifest() *render.Manifest  { return s.manifest }
+func (s *slAnalyzeTestSession) Database() *render.Database  { return nil }
+func (s *slAnalyzeTestSession) WidgetDataSources() *render.WidgetDataSources {
+	return nil
+}
+func (s *slAnalyzeTestSession) Reference() render.Hub { return nil }
+func (s *slAnalyzeTestSession) Rerender() render.SessionRenderFS {
+	return s.rerender
+}
+func (s *slAnalyzeTestSession) TargetSessions() targetsession.TargetSessionProvider {
+	return nil
 }
 
 // EmitOutputForRun records calls and returns configured errors.
@@ -131,6 +156,14 @@ func expectSlAnalyzeOutputs(t *testing.T, fs *mockRenderFS, runID run.RunID, ent
 	for _, output := range slAnalyzeOutputs(entity) {
 		err := errorsBySource[output.sourceRel]
 		fs.On("EmitOutputForRun", runID, output.sourceRel, output.destRel, output.meta).Return(err)
+	}
+}
+
+func expectSlAnalyzePendingOutputs(t *testing.T, fs *mockRenderFS, runID run.RunID, entity string) {
+	t.Helper()
+
+	for _, output := range slAnalyzeOutputs(entity) {
+		fs.On("EmitPendingOutputForRun", runID, output.destRel, output.meta).Return(nil)
 	}
 }
 
@@ -258,6 +291,56 @@ func TestSlAnalyzeRendererEmitOutputsErrorsOnRequiredFile(t *testing.T) {
 	err := renderer.emitOutputs(fs, runID, false)
 	assert.ErrorIs(t, err, run.ErrRenderTempFileNotFound)
 	fs.AssertExpectations(t)
+}
+
+func TestSlAnalyzeRendererInitializeReturnsPendingForPendingCaptureManifest(t *testing.T) {
+	renderer := &SlAnalyzeRenderer{}
+	err := renderer.Configure(&render.Config{JSON: `{"filter_pid": 1234}`})
+	require.NoError(t, err)
+
+	runID := run.RunID{Value: "run1"}
+	model := cdf.NewOnDiskModel("/base", &cdf.Manifest{Entries: []cdf.ManifestEntry{
+		{
+			Path:          "tool/neoprof/0/capture.apc/**/*",
+			ComponentType: cdf.ComponentType{Name: "capture_apc", SchemaVersion: "1.0"},
+			Pending:       true,
+		},
+	}}, cdf.Metadata{})
+	fs := &mockRenderFS{}
+	expectSlAnalyzePendingOutputs(t, fs, runID, "tool/neoprof/0/")
+
+	manifest := render.NewManifest()
+	session := &slAnalyzeTestSession{
+		content: &render.ContentMap{
+			Entries: []render.ContentMapEntry{{
+				ID:    runID,
+				Model: model,
+			}},
+		},
+		manifest: &manifest,
+		rerender: fs,
+	}
+
+	err = renderer.Initialize(session, nil)
+	require.ErrorIs(t, err, cdf.ErrComponentPending)
+	fs.AssertExpectations(t)
+}
+
+func TestSlAnalyzeRendererResolveCaptureRootReturnsCaptureDirectory(t *testing.T) {
+	renderer := &SlAnalyzeRenderer{}
+	err := renderer.Configure(&render.Config{JSON: `{"filter_pid": 1234}`})
+	require.NoError(t, err)
+
+	model := cdf.NewOnDiskModel("/base", &cdf.Manifest{Entries: []cdf.ManifestEntry{
+		{
+			Path:          "tool/neoprof/0/capture.apc/**/*",
+			ComponentType: cdf.ComponentType{Name: "capture_apc", SchemaVersion: "1.0"},
+		},
+	}}, cdf.Metadata{})
+
+	captureDir, err := renderer.resolveCaptureRoot(model)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.FromSlash("/base/tool/neoprof/0/capture.apc"), captureDir)
 }
 
 func TestSlAnalyzeHostSubdirFor(t *testing.T) {

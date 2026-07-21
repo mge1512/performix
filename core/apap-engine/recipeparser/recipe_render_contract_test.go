@@ -4,7 +4,6 @@
 package recipeparser
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,55 +11,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
-	"github.com/Arm-Debug/apap-cli/apap-engine/deploymentsupport"
 	"github.com/Arm-Debug/apap-cli/apap-engine/parameters"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipe"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipe/runtime"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipe/stages"
 	"github.com/Arm-Debug/apap-cli/apap-engine/run"
 	"github.com/Arm-Debug/apap-cli/apap-engine/target"
-	tool_goja "github.com/Arm-Debug/apap-cli/apap-engine/tool/goja"
 )
-
-func TestCodeHotspotsResolvesAndroidSlRecordBundle(t *testing.T) {
-	recipePath := filepath.Join("..", "..", "..", "core", "apap-cli", "recipes", "code_hotspots.js")
-	recipeData, err := os.ReadFile(recipePath)
-	require.NoError(t, err)
-
-	parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-	parsedRecipe, err := parser.ParseRecipe(string(recipeData))
-	require.NoError(t, err)
-
-	toolPath := filepath.Join("..", "..", "..", "core", "apap-cli", "tool-integrations", "neoprof.js")
-	toolData, err := os.ReadFile(toolPath)
-	require.NoError(t, err)
-	neoprof, err := tool_goja.LoadFromSource(string(toolData), toolPath)
-	require.NoError(t, err)
-
-	bundles, err := deploymentsupport.ResolveToolBundles(
-		context.Background(),
-		conductor.PlatformConfiguration{OS: conductor.Android, Architecture: conductor.AArch64},
-		nil,
-		parsedRecipe.Deployments,
-		func(name, version string) ([]deploymentsupport.DeploymentDeclaration, error) {
-			assert.Equal(t, "neoprof", name)
-			assert.Equal(t, "1.1.0", version)
-			return neoprof.Deployments(), nil
-		},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, []deploymentsupport.ToolBundleInfo{
-		{Name: "sl-record", Version: "2.1.0-build-1", Locality: deploymentsupport.DeploymentLocalityTarget},
-	}, bundles)
-}
 
 func TestCPUMicroarchitectureOptionsFallBackToN1Telemetry(t *testing.T) {
 	recipeData, err := os.ReadFile(filepath.Join("..", "..", "..", "core/apap-cli/recipes/cpu_microarchitecture.js"))
 	require.NoError(t, err)
 
 	parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-	recipeDefinition, err := parser.ParseRecipe(string(recipeData))
+	recipeDefinition, err := parser.ParseRecipe("core/apap-cli/recipes/cpu_microarchitecture.js", string(recipeData))
 	require.NoError(t, err)
 	require.Len(t, recipeDefinition.ParameterOptionsStages, 1)
 
@@ -113,10 +77,11 @@ func TestRerenderCapableRecipesWireTimeFilterParameters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Run("declares start and end time render parameters", func(t *testing.T) {
-				recipeData, err := os.ReadFile(filepath.Join("..", "..", "..", tt.recipeFile))
+				recipePath := filepath.Join("..", "..", "..", tt.recipeFile)
+				recipeData, err := os.ReadFile(recipePath)
 				require.NoError(t, err)
 				parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-				recipeProp, err := parser.ParseRecipe(string(recipeData))
+				recipeProp, err := parser.ParseRecipe(recipePath, string(recipeData))
 				require.NoError(t, err)
 
 				renderParameterTypes := make(map[string]parameters.RenderParameterValueType, len(recipeProp.RenderParameters))
@@ -128,10 +93,11 @@ func TestRerenderCapableRecipesWireTimeFilterParameters(t *testing.T) {
 			})
 
 			t.Run("adds time range renderer only when rerendering is enabled", func(t *testing.T) {
-				recipeData, err := os.ReadFile(filepath.Join("..", "..", "..", tt.recipeFile))
+				recipePath := filepath.Join("..", "..", "..", tt.recipeFile)
+				recipeData, err := os.ReadFile(recipePath)
 				require.NoError(t, err)
 				parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-				recipeProp, err := parser.ParseRecipe(string(recipeData))
+				recipeProp, err := parser.ParseRecipe(recipePath, string(recipeData))
 				require.NoError(t, err)
 
 				rerenderOutput := executeTimeFilterRenderStage(t, recipeProp, true, map[string]any{

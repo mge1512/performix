@@ -952,7 +952,11 @@ let tool = {
       if (wheelExistsResult.rc !== 0) {
         throw {
           code: 'tool_integrations.common.TOOL_NOT_DEPLOYED',
-          metadata: { tool: tool.name, deployPath: deployPath },
+          metadata: {
+            tool: tool.name,
+            deployPath: deployPath,
+            locality: engine.getLocality(),
+          },
         };
       }
 
@@ -1066,7 +1070,7 @@ let tool = {
     // Register the output files once setup is complete and the run is ready to launch.
     engine.emitOutput(
       `${runDataDir}/**/*`,
-      'output/*',
+      'output/**/*',
       /** @type {any} */ ({ name: 'asct-data', version: '1.0' }),
     );
     engine.emitOutput(

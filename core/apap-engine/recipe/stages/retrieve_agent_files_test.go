@@ -503,6 +503,90 @@ func TestRetrieveAgentFilesStage_Execute(t *testing.T) {
 		tAgent.AssertExpectations(t)
 	})
 
+	t.Run("structured wildcard with no matches is skipped", func(t *testing.T) {
+		tAgent := &targetagentmocks.TargetAgentClient{}
+		tAgent.On("ListFiles", mock.Anything, mock.Anything).
+			Return(&targetagentproto.ListFilesResponse{
+				Responses: []*targetagentproto.FileInfos{
+					{FileInfos: []*targetagentproto.FileInfo{
+						{Path: "/remote/timeline/series_id=*/bin_duration=*/counter.parquet", Error: os.ErrNotExist.Error()},
+					}},
+				},
+			}, nil).Once()
+
+		stage := &RetrieveAgentFilesStage{
+			RecipeCollector: &recipe.Collector{
+				FileRetriever: &recipe.RetrieveAgentFilesStageRetriever{
+					FileTransfers: []recipe.TransferRequest{
+						{
+							FileTransfer: conductor.FileTransfer{
+								LocalPath:  filepath.Join(t.TempDir(), "out", "series_id=*", "bin_duration=*", "counter.parquet"),
+								RemotePath: "/remote/timeline/series_id=*/bin_duration=*/counter.parquet",
+							},
+							AgentSupplier: func() *agent.AgentConn { return &agent.AgentConn{Client: tAgent} },
+						},
+					},
+				},
+			},
+		}
+		stageCtx := &recipe.StageContext{
+			Context: context.Background(),
+			CommandStateChannel: &cmdsync.CommandStateChannel{
+				StopChan: make(chan struct{}),
+			},
+		}
+
+		_, err := stage.Execute(stageCtx)
+		require.NoError(t, err)
+		tAgent.AssertExpectations(t)
+	})
+
+	t.Run("concrete remote missing with globbed local is reported as an error", func(t *testing.T) {
+		remotePath := "/remote/timeline/counter.parquet"
+
+		tAgent := &targetagentmocks.TargetAgentClient{}
+		tAgent.On("ListFiles", mock.Anything, mock.Anything).
+			Return(&targetagentproto.ListFilesResponse{
+				Responses: []*targetagentproto.FileInfos{
+					{FileInfos: []*targetagentproto.FileInfo{
+						{Path: remotePath, Error: os.ErrNotExist.Error()},
+					}},
+				},
+			}, nil).Once()
+
+		stage := &RetrieveAgentFilesStage{
+			RecipeCollector: &recipe.Collector{
+				FileRetriever: &recipe.RetrieveAgentFilesStageRetriever{
+					FileTransfers: []recipe.TransferRequest{
+						{
+							FileTransfer: conductor.FileTransfer{
+								LocalPath:  filepath.Join(t.TempDir(), "out", "series_id=*", "counter.parquet"),
+								RemotePath: remotePath,
+							},
+							AgentSupplier: func() *agent.AgentConn { return &agent.AgentConn{Client: tAgent} },
+						},
+					},
+				},
+			},
+		}
+		stageCtx := &recipe.StageContext{
+			Context: context.Background(),
+			CommandStateChannel: &cmdsync.CommandStateChannel{
+				StopChan: make(chan struct{}),
+			},
+		}
+
+		_, err := stage.Execute(stageCtx)
+		expectedMetadata := map[string]string{
+			"filePath": remotePath,
+			"error":    fmt.Sprintf("file does not exist on target: %q", os.ErrNotExist.Error()),
+		}
+		expectedErr := message.New(message.EngineRecipeStagesRetrieveAgentFilesRetrieveFile).WithMetadata(expectedMetadata)
+		require.Equal(t, expectedErr, err)
+		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
+		tAgent.AssertExpectations(t)
+	})
+
 	t.Run("Stopped run transfers all files", func(t *testing.T) {
 		s := newTestStage(t, true)
 

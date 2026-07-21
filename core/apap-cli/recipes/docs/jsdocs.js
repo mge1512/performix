@@ -597,6 +597,10 @@
  * Register an artifact produced by the tool for collection.
  * `path` locates the artifact on the locality's filesystem. `runRelativePath` specifies the destination path inside
  * the run directory on the host.
+ * For globbed outputs, `runRelativePath` must use the same wildcard-containing suffix as `path`,
+ * starting at the first path segment containing `*`, after path normalization. Only the concrete
+ * prefix before that segment may differ.
+ * Globs may not rename or reshape wildcarded path segments.
  * `transferOptions` defines configuration options for how the transfer should be executed.
  * Artifacts will only be transferred on successful tool integration, whereas log files will always be collected.
  * @property {() => boolean} isFullCaptureSupportEnabled
@@ -620,8 +624,13 @@
  * @property {(name:string) => Engine} withLocality
  * Return an engine instance that routes operations through the specified locality.
  * Supported values are currently `"target"` and `"host"`.
+ * @property {() => string} getLocality
+ * Return the current engine locality name.
  * @property {() => string} toolsRoot
  * Return the root tool deployment directory for this engine locality.
+ *
+ * @property {(sourceLocality:("target"), sourcePath:string, destinationPath:string) => Promise<void>} copyFrom
+ * Copy a file from another locality to the current engine locality and resolve when the copy has completed.
  */
 
 /**

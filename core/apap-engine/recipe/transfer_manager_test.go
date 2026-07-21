@@ -1344,7 +1344,10 @@ func TestTransferManagerFlushTransfers(t *testing.T) {
 		client := &targetagentmocks.TargetAgentClient{}
 		tm, _, baseCancel, _ := newStartTransferTestManager(t, client, 1)
 		transfer := fileTransfer(t, false)
-		transferErr := errors.New("transfer failed")
+		transferErr := message.New(message.EnginePathRemapWildcardSuffixMismatch).WithMetadata(map[string]string{
+			"localPath":  "output/result.csv",
+			"remoteBase": "tmp/out/*.csv",
+		})
 		tm.transferErrors.add(phase1TransferPhase, transfer, transferErr)
 
 		got := tm.flushTransfers(FlushTransfersMessage{runSucceeded: true}, baseCancel)
@@ -1353,7 +1356,8 @@ func TestTransferManagerFlushTransfers(t *testing.T) {
 			"filePath": transfer.RemotePath,
 			"error":    transferErr.Error(),
 		})
-		assert.Equal(t, expected, got)
+		assert.ErrorIs(t, got, expected)
+		assert.ErrorIs(t, got, transferErr)
 		assert.NoError(t, message.ValidateMetadataPlaceholders(got))
 		client.AssertExpectations(t)
 	})
@@ -1378,7 +1382,9 @@ func TestTransferManagerFlushTransfers(t *testing.T) {
 			transferErrorPath(secondTransfer): secondErr.Error(),
 			"numFiles":                        "2",
 		})
-		assert.Equal(t, expected, got)
+		assert.ErrorIs(t, got, expected)
+		assert.ErrorIs(t, got, firstErr)
+		assert.ErrorIs(t, got, secondErr)
 		assert.NoError(t, message.ValidateMetadataPlaceholders(got))
 		client.AssertExpectations(t)
 	})
@@ -1599,6 +1605,26 @@ func TestTransferManagerStartTransfer(t *testing.T) {
 		assert.Empty(t, tm.completedTransfers)
 		requireNoTransferErrors(t, tm)
 		requireLogContains(t, logBuf.String(), "[TransferManager] Transfer skipped: '"+transfer.RemotePath+"' -> '"+transfer.LocalPath+"': glob expansion has no matches")
+		client.AssertExpectations(t)
+	})
+
+	t.Run("does not skip missing concrete remote when local is globbed", func(t *testing.T) {
+		defer goleak.VerifyNone(t)
+		client := &targetagentmocks.TargetAgentClient{}
+		tm, _, _, _ := newStartTransferTestManager(t, client, 1)
+		transfer := globFileTransfer(t)
+		transfer.RemotePath = testRemotePath
+		mockListFiles(client, transfer.RemotePath, listFilesResponse(&targetagentproto.FileInfo{
+			Path:  transfer.RemotePath,
+			Error: os.ErrNotExist.Error(),
+		}))
+
+		tm.startTransferRequest(TransferRequest{FileTransfer: transfer, AgentSupplier: agentSupplier(client)})
+		requireWaitGroupDone(t, &tm.baseWg)
+
+		got := requireTransferError(t, tm, phase1TransferPhase, transfer)
+		assert.Contains(t, got, `file does not exist on target: "file does not exist"`)
+		assert.Empty(t, tm.completedTransfers)
 		client.AssertExpectations(t)
 	})
 
@@ -2229,4 +2255,38 @@ func TestTransferManagerTransferErrors(t *testing.T) {
 		}, errs.backgroundCopy())
 		assert.NotContains(t, errs.combined(), newTransferErrorKey(conductor.FileTransfer{RemotePath: "/remote/third.txt", LocalPath: "/local/third.txt"}))
 	})
+}
+
+func TestTransferManagerCopyFromTargetAndWait(t *testing.T) {
+	client := &targetagentmocks.TargetAgentClient{}
+	tm, _, _, _ := newStartTransferTestManager(t, client, 1)
+	tm.ListeningStarted = make(chan struct{})
+	close(tm.ListeningStarted)
+	tm.transferRequestChannel = make(chan AddTransferMessage, 1)
+	tm.listeningDone = make(chan struct{})
+	transfer := fileTransfer(t, false)
+	mockSingleListFiles(client, transfer.RemotePath)
+	mockRetrieveFile(client, transfer.RemotePath)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- tm.CopyFromTargetAndWait(transfer, agentSupplier(client))
+	}()
+
+	msg := requireMessage(t, tm.transferRequestChannel, "CopyFromTargetAndWait did not send transfer request")
+	assert.Equal(t, transfer, msg.t.FileTransfer)
+	assert.NotNil(t, msg.t.AgentSupplier)
+	assert.True(t, msg.t.ImmediateRetrieval)
+
+	close(msg.confirm)
+	requireNoMessage(t, done, func(got error) string {
+		return "CopyFromTargetAndWait returned before the transfer completed"
+	})
+
+	tm.startTransferRequest(msg.t)
+	requireWaitGroupDone(t, &tm.baseWg)
+
+	require.NoError(t, requireMessage(t, done, "CopyFromTargetAndWait did not return"))
+	requireFileContents(t, transfer.LocalPath, testFileContents)
+	client.AssertExpectations(t)
 }

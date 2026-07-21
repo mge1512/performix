@@ -108,7 +108,11 @@ let tool = {
       advice.push({
         level: 'error',
         messageCode: 'tool_integrations.common.TOOL_NOT_DEPLOYED',
-        metadata: { tool: tool.name, deployPath: deployment.deployRoot },
+        metadata: {
+          tool: tool.name,
+          deployPath: deployment.deployRoot,
+          locality: engine.getLocality(),
+        },
       });
     }
     return { available: available, advice: advice, capabilities: {} };
@@ -276,7 +280,11 @@ async function setup(engine, ctx) {
       return {
         error: {
           code: 'tool_integrations.common.TOOL_NOT_DEPLOYED',
-          metadata: { tool: tool.name, deployPath: deployment.deployRoot },
+          metadata: {
+            tool: tool.name,
+            deployPath: deployment.deployRoot,
+            locality: engine.getLocality(),
+          },
         },
         deployment,
       };
@@ -289,6 +297,7 @@ async function setup(engine, ctx) {
           metadata: {
             tool: tool.name,
             deployPath: deployment.deployRoot,
+            locality: engine.getLocality(),
           },
         },
         deployment,

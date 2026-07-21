@@ -239,6 +239,30 @@ func TestRunCreate(t *testing.T) {
 		assert.NoError(t, err)
 		assert.DirExists(t, runPath)
 	})
+	t.Run("run creation does not materialize glob directories for pending components", func(t *testing.T) {
+		runCollection := NewTestRunCollection(t, t.TempDir())
+		builder, err := runCollection.RunBuilder()
+		require.NoError(t, err)
+
+		componentType := cdf.ComponentType{Name: "capture_apc", SchemaVersion: "1.0"}
+		builder.AddPendingComponent(componentType, "capture.apc/**/*")
+
+		runID, err := runCollection.CreateRun(builder, &cdf.Metadata{})
+		require.NoError(t, err)
+
+		runPath := runCollection.GetRunPath(runID)
+		assert.DirExists(t, filepath.Join(runPath, "capture.apc"))
+		assert.NoDirExists(t, filepath.Join(runPath, "capture.apc", "**"))
+		assert.NoDirExists(t, filepath.Join(runPath, "capture.apc", "**", "*"))
+
+		manifest, err := runCollection.readManifest(runID)
+		require.NoError(t, err)
+		assert.Equal(t, &cdf.ManifestEntry{
+			Path:          "capture.apc/**/*",
+			ComponentType: componentType,
+			Pending:       true,
+		}, manifest.Lookup("capture.apc/**/*"))
+	})
 }
 
 func TestRunDelete(t *testing.T) {

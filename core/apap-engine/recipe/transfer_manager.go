@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -40,6 +41,7 @@ type TransferRequest struct {
 	AgentSupplier        AgentConnSupplier
 	ImmediateRetrieval   bool
 	BackgroundTransfer   bool
+	completion           *transferRequestCompletion
 }
 
 type AddTransferMessage struct {
@@ -298,10 +300,15 @@ func (t *TransferManager) Listen(logger logrus.FieldLogger, cmdStateChannel *cmd
 // at the point of calling this method). If the TransferManager is not listening, this method will
 // return immediately.
 func (t *TransferManager) AddTransfer(request TransferRequest) {
+	t.addTransfer(request)
+}
+
+func (t *TransferManager) addTransfer(request TransferRequest) {
 	// Exit early if manager is not available to listen before the message can be sent
 	select {
 	case <-t.ListeningStarted:
 	default:
+		request.completion.complete(errors.New("transfer manager has not started listening yet"))
 		return
 	}
 
@@ -314,6 +321,7 @@ func (t *TransferManager) AddTransfer(request TransferRequest) {
 		<-confirm
 		return
 	case <-t.listeningDone:
+		request.completion.complete(errors.New("transfer manager is no longer listening"))
 		return
 	}
 }
@@ -438,7 +446,7 @@ func (t *TransferManager) flushTransfer(flush FlushTransfersMessage, request Tra
 	if !flush.runSucceeded && !isTransferMandatory(transfer) {
 		// Increment the observer transfer count, but with 0 bytes to transfer (since it was skipped)
 		t.stageProgressTrackers.GetFromPhase(phase).AddBytesToTotal(0)
-		t.finishManifestRequest(request, false)
+		t.finishTransferRequest(request, false)
 		return
 	}
 	// Note this is not in a separate goroutine, because each definite transfer that this (potentially) globbed
@@ -454,17 +462,25 @@ func (t *TransferManager) transferErrorMessage(flush FlushTransfersMessage, file
 		if len(fileRetrievalErrors) > 1 {
 			metadata := transferErrorMetadata(fileRetrievalErrors)
 			metadata["numFiles"] = strconv.Itoa(len(fileRetrievalErrors))
-			return message.New(message.EngineRecipeStagesRetrieveAgentFilesRetrieveFiles).WithMetadata(metadata)
+			causes := make([]error, 0, len(fileRetrievalErrors))
+			for _, err := range fileRetrievalErrors {
+				causes = append(causes, err)
+			}
+			return message.New(message.EngineRecipeStagesRetrieveAgentFilesRetrieveFiles).
+				WithMetadata(metadata).
+				WithCause(errors.Join(causes...))
 		} else {
 			metadata := map[string]string{}
+			var cause error
 			// fileRetrievalErrors only has length 1
 			for key, err := range fileRetrievalErrors {
 				metadata["filePath"] = key.remotePath
 				metadata["error"] = err.Error()
+				cause = err
 				// To make certain that we only do this once
 				break
 			}
-			return message.New(message.EngineRecipeStagesRetrieveAgentFilesRetrieveFile).WithMetadata(metadata)
+			return message.New(message.EngineRecipeStagesRetrieveAgentFilesRetrieveFile).WithMetadata(metadata).WithCause(cause)
 		}
 	}
 
@@ -488,14 +504,14 @@ func (t *TransferManager) startTransferRequest(request TransferRequest) {
 	agentConn, err := resolveTransferAgentConn(request)
 	if err != nil {
 		t.recordTransferError(message.New(message.CommonUnknownError).WithCause(err), transfer, phase)
-		t.finishManifestRequest(request, false)
+		t.finishTransferRequest(request, false)
 		t.stageProgressTrackers.GetFromPhase(phase).AddBytesToTotal(0)
 		return
 	}
 	fileInfos, err := agentConn.Client.ListFiles(transferCtx, &targetagentproto.ListFilesRequest{Paths: fileInfoRequest})
 	if err != nil {
 		t.recordTransferError(message.New(message.CommonUnknownError).WithCause(err), transfer, phase)
-		t.finishManifestRequest(request, false)
+		t.finishTransferRequest(request, false)
 		t.stageProgressTrackers.GetFromPhase(phase).AddBytesToTotal(0)
 		return
 	} else if len(fileInfos.Responses) != 1 {
@@ -504,18 +520,19 @@ func (t *TransferManager) startTransferRequest(request TransferRequest) {
 			transfer,
 			phase,
 		)
-		t.finishManifestRequest(request, false)
+		t.finishTransferRequest(request, false)
 		t.stageProgressTrackers.GetFromPhase(phase).AddBytesToTotal(0)
 		return
 	}
 	fileInfo := fileInfos.Responses[0]
 
-	localIsGlob := len(transfer.LocalPath) > 0 && (transfer.LocalPath[len(transfer.LocalPath)-1] == '*')
+	localIsGlob := strings.ContainsRune(transfer.LocalPath, '*')
+	remoteIsGlob := strings.ContainsRune(transfer.RemotePath, '*')
 	remoteDoesntExist := len(fileInfo.FileInfos) == 1 && fileInfo.FileInfos[0].Error == os.ErrNotExist.Error()
 	// It's valid for glob extensions to not map to a file, when this occurs log & skip
-	if localIsGlob && remoteDoesntExist {
+	if localIsGlob && remoteIsGlob && remoteDoesntExist {
 		t.observer.OnTransferSkipped(transfer, "glob expansion has no matches")
-		t.finishManifestRequest(request, false)
+		t.finishTransferRequest(request, false)
 		t.stageProgressTrackers.GetFromPhase(phase).AddBytesToTotal(0)
 		return
 	}
@@ -539,7 +556,7 @@ func (t *TransferManager) startTransferRequest(request TransferRequest) {
 
 		exclude, err := util.MatchesAny(info.Path, transfer.Exclude)
 		if err != nil {
-			t.recordTransferError(fmt.Errorf("error checking if file should be excluded: %q", err), infoTransfer, phase)
+			t.recordTransferError(fmt.Errorf("error checking if file should be excluded: %w", err), infoTransfer, phase)
 			requestFailed = true
 			continue
 		}
@@ -557,13 +574,13 @@ func (t *TransferManager) startTransferRequest(request TransferRequest) {
 
 	if len(filteredInfos) == 0 {
 		// If no files (i.e directory-only), remove entry from manifest.
-		t.finishManifestRequest(request, false)
+		t.finishTransferRequest(request, false)
 	}
 	for _, fi := range filteredInfos {
 		localPath, err := util.RemapGlobbedPath(transfer.LocalPath, fi.Path, transfer.RemotePath)
 		if err != nil {
 			remapTransfer := conductor.FileTransfer{RemotePath: fi.Path, LocalPath: transfer.LocalPath, ComponentType: transfer.ComponentType}
-			t.recordTransferError(fmt.Errorf("error remapping globbed path: %q", err), remapTransfer, phase)
+			t.recordTransferError(fmt.Errorf("error remapping globbed path: %w", err), remapTransfer, phase)
 			requestCompletion.done(false)
 			continue
 		}
@@ -618,7 +635,7 @@ func (c *transferRequestCompletionTracker) done(success bool) {
 	if c.completed != c.total {
 		return
 	}
-	c.t.finishManifestRequest(c.request, !c.failed)
+	c.t.finishTransferRequest(c.request, !c.failed)
 }
 
 func (t *TransferManager) addPendingManifestEntry(request TransferRequest) {
@@ -647,6 +664,15 @@ func (t *TransferManager) finishManifestRequest(request TransferRequest, artifac
 	if err != nil {
 		t.recordTransferError(fmt.Errorf("failed to update manifest entry: %w", err), request.FileTransfer, transferPhaseForRequest(request))
 	}
+}
+
+func (t *TransferManager) finishTransferRequest(request TransferRequest, artifactComplete bool) {
+	t.finishManifestRequest(request, artifactComplete)
+	if artifactComplete {
+		request.completion.complete(nil)
+		return
+	}
+	request.completion.complete(fmt.Errorf("transfer did not complete: %s", request.RemotePath))
 }
 
 // startConcreteTransfer starts one concrete transfer in a goroutine. The caller has already
@@ -685,7 +711,7 @@ func (t *TransferManager) startConcreteTransfer(
 		err := t.transferSlots.Acquire(transferCtx, phase)
 		if err != nil {
 			t.recordTransferError(
-				fmt.Errorf("error acquiring transfer slot for target (maybe context was cancelled?): %q", err),
+				fmt.Errorf("error acquiring transfer slot for target (maybe context was cancelled?): %w", err),
 				resolvedTransfer,
 				phase,
 			)
@@ -701,7 +727,7 @@ func (t *TransferManager) startConcreteTransfer(
 		t.observer.OnTransferStarted(resolvedTransfer)
 		err = agent.ReceiveFile(transferCtx, resolvedTransfer.LocalPath, resolvedTransfer.RemotePath, agentClient, transferProgress)
 		if err != nil {
-			t.recordTransferError(fmt.Errorf("transfer failed %q", err), resolvedTransfer, phase)
+			t.recordTransferError(fmt.Errorf("transfer failed %w", err), resolvedTransfer, phase)
 		} else {
 			t.observer.OnTransferSuccess(resolvedTransfer)
 			t.addCompletedTransfer(resolvedTransfer)
@@ -758,4 +784,38 @@ func (t *TransferManager) getCompletedTransfersCopy() []conductor.FileTransfer {
 }
 func isTransferMandatory(transfer conductor.FileTransfer) bool {
 	return cdf.IsLogComponentType(transfer.ComponentType)
+}
+
+type transferRequestCompletion struct {
+	done chan error
+	once sync.Once
+}
+
+func newTransferRequestCompletion() *transferRequestCompletion {
+	return &transferRequestCompletion{done: make(chan error, 1)}
+}
+
+func (c *transferRequestCompletion) wait() error {
+	return <-c.done
+}
+
+func (c *transferRequestCompletion) complete(err error) {
+	if c == nil {
+		return
+	}
+	c.once.Do(func() {
+		c.done <- err
+		close(c.done)
+	})
+}
+
+func (t *TransferManager) CopyFromTargetAndWait(transfer conductor.FileTransfer, agentSupplier AgentConnSupplier) error {
+	completion := newTransferRequestCompletion()
+	t.addTransfer(TransferRequest{
+		FileTransfer:       transfer,
+		AgentSupplier:      agentSupplier,
+		ImmediateRetrieval: true,
+		completion:         completion,
+	})
+	return completion.wait()
 }

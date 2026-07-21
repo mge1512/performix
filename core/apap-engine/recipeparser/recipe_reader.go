@@ -127,7 +127,7 @@ func ReadRecipe(reader FileReader, file string) (recipe.Recipe, error) {
 	if err != nil {
 		return newRecipe, err
 	}
-	recipe, err := parser.ParseRecipe(string(recipeData))
+	recipe, err := parser.ParseRecipe(file, string(recipeData))
 	if err != nil {
 		return newRecipe, err
 	}
@@ -153,7 +153,7 @@ func ReadRecipes(reader FileReader, parser RecipeParser, errHandler func(string,
 			continue
 		}
 
-		recipe, err := parser.ParseRecipe(string(contents))
+		recipe, err := parser.ParseRecipe(file, string(contents))
 		if err != nil {
 			handlerErr := message.New(message.EngineRecipeparserRecipeReaderParseRecipe).WithCause(err).WithMetadata(metadata)
 			errHandler(file, handlerErr)

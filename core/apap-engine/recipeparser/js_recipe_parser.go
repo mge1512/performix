@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja_nodejs/require"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf/semver"
@@ -24,7 +26,7 @@ import (
 
 // RecipeParser defines the interface for parsing recipes
 type RecipeParser interface {
-	ParseRecipe(content string) (recipe.Recipe, error)
+	ParseRecipe(sourceName string, content string) (recipe.Recipe, error)
 }
 
 type APIFactory func(*goja.Runtime, recipe.ExecutionContext, context.Context, *cmdsync.CommandState, *cmdsync.CommandStateChannel, *notifiers.DeferredActions) RecipeAPI
@@ -78,18 +80,31 @@ type Dependencies struct {
 }
 
 // Parses the recipes and returns a list of recipe stages
-func (r *RecipeParserJS) ParseRecipe(name string) (recipe.Recipe, error) {
+func (r *RecipeParserJS) ParseRecipe(sourceName string, content string) (recipe.Recipe, error) {
 	r.vm = goja.New()
+	require.NewRegistry().Enable(r.vm)
+
+	if sourceName == "" {
+		sourceName = "<recipe>"
+	}
+	if !strings.HasPrefix(sourceName, "<") {
+		sourceName = util.CanonicalPath(sourceName)
+	}
+
 	recipeOut := recipe.Recipe{}
-	recipe, err := r.parseRecipeJS(name)
+	recipe, err := r.parseRecipeJS(sourceName, content)
 	if err != nil {
 		return recipeOut, err
 	}
 	return r.getRecipeProperties(recipe)
 }
 
+func ParseInlineRecipe(parser RecipeParser, content string) (recipe.Recipe, error) {
+	return parser.ParseRecipe("<inline-recipe>", content)
+}
+
 // ParseRecipe takes the string representation of a file and returns the Recipe struct representation
-func (r *RecipeParserJS) parseRecipeJS(recipeFileData string) (Recipe, error) {
+func (r *RecipeParserJS) parseRecipeJS(sourceName string, recipeFileData string) (Recipe, error) {
 	recipe := Recipe{}
 
 	if err := gojautils.SetPerformixGlobal(r.vm); err != nil {
@@ -100,7 +115,12 @@ func (r *RecipeParserJS) parseRecipeJS(recipeFileData string) (Recipe, error) {
 	}
 
 	// Load the JS script
-	_, err := r.vm.RunString(recipeFileData)
+	prog, err := goja.Compile(sourceName, recipeFileData, false)
+	if err != nil {
+		log.Debugf("unable to compile recipe: %v", err)
+		return recipe, err
+	}
+	_, err = r.vm.RunProgram(prog)
 	if err != nil {
 		log.Debugf("unable to parse recipe: %v", err)
 		return recipe, err

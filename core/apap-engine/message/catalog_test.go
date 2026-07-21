@@ -57,6 +57,12 @@ func TestCatalog(t *testing.T) {
 		assert.Equal(t, "The daemon was not running.", msg.Explanation)
 		assert.Equal(t, "Start the daemon and try again.", msg.Advice)
 	})
+	t.Run("catalog metadata keys are detected", func(t *testing.T) {
+		assert.True(t, IsCatalogMetadataKey("metadata"))
+		assert.True(t, IsCatalogMetadataKey("_schema"))
+		assert.False(t, IsCatalogMetadataKey("engine"))
+		assert.False(t, IsCatalogMetadataKey("metadataExtra"))
+	})
 	t.Run("as string always produces a string", func(t *testing.T) {
 		assert.Equal(t, "hello", asString("hello"))
 		assert.Equal(t, "", asString(123))

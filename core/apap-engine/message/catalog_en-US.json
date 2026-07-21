@@ -1547,6 +1547,44 @@
         "Advice": "Contact the tool integration author if this is a user-created tool integration, or Arm support if this is an Arm-provided tool integration. If you are the tool integration author, specify at least one valid option for this parameter."
       }
     },
+    "path_remap": {
+      "COORDINATE_SPACE_MISMATCH": {
+        "Severity": "Error",
+        "Message": "The globbed path mapping is invalid.",
+        "Explanation": "{$PRODUCT_FULL_NAME} cannot remap the matched source path `{remotePath}` because the source template `{remoteBase}` does not use the same path style. Both paths must be absolute or both must be relative.",
+        "Advice": "Update the recipe or renderer path templates so the matched source path and its template are both absolute or both relative."
+      },
+      "WILDCARD_SUFFIX_MISMATCH": {
+        "Severity": "Error",
+        "Message": "The globbed path mapping is invalid.",
+        "Explanation": "{$PRODUCT_FULL_NAME} cannot remap to `{localPath}` because that destination template does not mirror the wildcard-containing suffix of `{remoteBase}`.",
+        "Advice": "Update the destination path template so it uses the same wildcard-containing suffix as the source template."
+      },
+      "REMOTE_PATH_PATTERN_MISMATCH": {
+        "Severity": "Error",
+        "Message": "The matched source path does not match its glob template.",
+        "Explanation": "{$PRODUCT_FULL_NAME} matched the source path `{remotePath}`, but that path does not satisfy the source template `{remoteBase}`.",
+        "Advice": "Check the source path template and the produced files, then ensure the matched path conforms to the template."
+      },
+      "PATH_TRAVERSAL": {
+        "Severity": "Error",
+        "Message": "The globbed path mapping would write outside the destination path.",
+        "Explanation": "{$PRODUCT_FULL_NAME} cannot remap to `{remappedPath}` because the matched path portion `{pathComponent}` contains `..` path traversal.",
+        "Advice": "Update the source and destination path templates so the matched path does not contain parent-directory traversal."
+      },
+      "RELATIVE_TEMPLATE_ABSOLUTE_PATH": {
+        "Severity": "Error",
+        "Message": "The globbed path mapping is invalid.",
+        "Explanation": "{$PRODUCT_FULL_NAME} cannot use the relative destination template `{localTemplate}` because it resolves to the absolute path `{remappedPath}`.",
+        "Advice": "Update the destination path template so it stays relative after remapping."
+      },
+      "RELATIVE_TEMPLATE_BASE_ESCAPE": {
+        "Severity": "Error",
+        "Message": "The globbed path mapping would escape the destination base path.",
+        "Explanation": "{$PRODUCT_FULL_NAME} cannot use the relative destination template `{localTemplate}` because it resolves outside its base path as `{remappedPath}`.",
+        "Advice": "Update the destination path template so remapping stays within the intended destination directory."
+      }
+    },
     "recipe": {
       "DOES_NOT_EXIST": {
         "Severity": "Error",
@@ -2516,9 +2554,9 @@
       },
       "TOOL_NOT_DEPLOYED": {
         "Severity": "Error",
-        "Message": "The `{tool}` tool is not deployed on the target.",
-        "Explanation": "The specified recipe invokes the `{tool}` tool. This tool does not exist in the expected location on the target (`{deployPath}`).",
-        "Advice": "To deploy this tool on the target, run the recipe with the `--deploy-tools` flag."
+        "Message": "The `{tool}` tool is not deployed on the {locality}.",
+        "Explanation": "The specified recipe invokes the `{tool}` tool. This tool does not exist in the expected location on the {locality} (`{deployPath}`).",
+        "Advice": "To deploy this tool on the {locality}, run the recipe with the `--deploy-tools` flag."
       },
       "WORKLOAD_NOT_EXIST": {
         "Severity": "Error",
