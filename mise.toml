@@ -9,3 +9,6 @@ python = "3.10"
 "github:go-task/task" = "v3.50.0"
 "github:protocolbuffers/protobuf" = "v23.4"
 "go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "v2.9.0"
+
+[env]
+NPM_CONFIG_REGISTRY = "https://artifactory.arm.com/artifactory/api/npm/mirrors.npmjs_org"

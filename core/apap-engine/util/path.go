@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/bmatcuk/doublestar"
+
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 )
 
 var metachar = '*'
@@ -49,30 +52,45 @@ func IsChildPath(basePath string, childPath string) bool {
 	return true
 }
 
-// RemapGlobbedPath composes a local concrete path by appending the path difference
-// between the concrete remote path and the non-glob base of the remote glob.
+func splitAtFirstWildcardSegment(path string) (prefix string, suffix string, ok bool) {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if strings.ContainsRune(segment, rune(metachar)) {
+			if i == 0 {
+				return "", strings.Join(segments[i:], "/"), true
+			}
+			if i == 1 && segments[0] == "" {
+				return "/", strings.Join(segments[i:], "/"), true
+			}
+			return strings.Join(segments[:i], "/"), strings.Join(segments[i:], "/"), true
+		}
+	}
+
+	return path, "", false
+}
+
+func joinPrefixAndDelta(prefix string, delta string) string {
+	// can't use path.Join() because that cleans the path and we need to
+	// preserve ../ for validation
+	switch {
+	case prefix == "":
+		return delta
+	case delta == "":
+		return prefix
+	default:
+		return prefix + "/" + delta
+	}
+}
+
+// RemapGlobbedPath composes a local concrete path by matching the concrete remote
+// path against the remote glob template and replacing the concrete remote prefix
+// with the local prefix when both templates share the same wildcard-containing suffix.
 // local - contains the local destination path
 // remote - contains the expanded glob path
 // remoteBase - contains the original remote path before expansion
 //
-// If remoteBase contains any glob, local MUST contain a single "*" at its end.
-// That trailing "*" is removed before the delta is appended.
-//
-// Globs in remoteBase must be on the end of the path: "a/*/c" and "a/b/*c" are
-// not valid.
-//
-// Only "*" is supported as a metacharacter. Paths cannot contain other
-// metacharacters ("?[]{}"). Metacharacter escaping is not supported.
-//
-// Example:
-//
-//	local     = "tool/0/abc*"
-//	remote    = "expanded/base/tool/0/abc-xyz/myFile"
-//	remoteBase= "expanded/base/tool/0/abc*/**/*"
-//
-// Result:
-//
-//	"tool/0/abc-xyz/myFile"
+// If remoteBase contains any glob, local MUST contain the same wildcard-containing
+// suffix, starting at the first path segment that contains a "*".
 func RemapGlobbedPath(local, remote, remoteBase string) (string, error) {
 	// Clean and convert to slashes internally - will reconvert back to appropriate local path
 	// separator before returning
@@ -95,6 +113,13 @@ func RemapGlobbedPath(local, remote, remoteBase string) (string, error) {
 	cleanRemote := ForceToSlash(filepath.Clean(normalisedRemote))
 	cleanRemoteBase := ForceToSlash(filepath.Clean(normalisedRemoteBase))
 
+	if isAbsolutePath(cleanRemote) != isAbsolutePath(cleanRemoteBase) {
+		return "", message.New(message.EnginePathRemapCoordinateSpaceMismatch).WithMetadata(map[string]string{
+			"remotePath": remote,
+			"remoteBase": remoteBase,
+		})
+	}
+
 	// Check that remote is a concrete path (doesn't contain any metachars)
 	if containsMetachar(cleanRemote) {
 		return "", fmt.Errorf("remote path '%v' must be concrete (cannot contain '%v')", remote, string(metachar))
@@ -111,20 +136,13 @@ func RemapGlobbedPath(local, remote, remoteBase string) (string, error) {
 		return filepath.FromSlash(cleanLocal), nil
 	}
 
-	// Check that local ends in single metachar
-	if strings.Count(cleanLocal, string(metachar)) != 1 || !strings.HasSuffix(cleanLocal, string(metachar)) {
-		return "", fmt.Errorf("remote base '%v' is globbed, so local path '%v' must contain exactly 1 '%v', at its end", remoteBase, local, string(metachar))
-	}
-
-	// Check that metachars in remoteBase are strictly a suffix
-	firstMetaCharIndex := strings.Index(cleanRemoteBase, string(metachar))
-	if strings.ContainsFunc(cleanRemoteBase[firstMetaCharIndex+1:], func(r rune) bool {
-		if r != metachar && r != '/' {
-			return true
-		}
-		return false
-	}) {
-		return "", fmt.Errorf("remote base '%v' contains literal characters after the first '%v'", remoteBase, string(metachar))
+	localPrefix, localSuffix, localHasWildcardSegment := splitAtFirstWildcardSegment(cleanLocal)
+	remotePrefix, remoteSuffix, remoteHasWildcardSegment := splitAtFirstWildcardSegment(cleanRemoteBase)
+	if !localHasWildcardSegment || !remoteHasWildcardSegment || localSuffix != remoteSuffix {
+		return "", message.New(message.EnginePathRemapWildcardSuffixMismatch).WithMetadata(map[string]string{
+			"localPath":  local,
+			"remoteBase": remoteBase,
+		})
 	}
 
 	// Validate remote under base
@@ -133,22 +151,104 @@ func RemapGlobbedPath(local, remote, remoteBase string) (string, error) {
 		return "", err
 	}
 	if !match {
-		return "", fmt.Errorf("remote path '%v' does not match remote base pattern '%v'", cleanRemote, cleanRemoteBase)
+		return "", message.New(message.EnginePathRemapRemotePathPatternMismatch).WithMetadata(map[string]string{
+			"remotePath": remote,
+			"remoteBase": remoteBase,
+		})
 	}
 
-	base := cleanRemoteBase[:firstMetaCharIndex]
-	rel := strings.TrimPrefix(cleanRemote, base)
+	if remotePrefix == "" {
+		// When there is no concrete prefix to trim, the entire remote path is the delta.
+		remappedLocal := joinPrefixAndDelta(localPrefix, cleanRemote)
+		if err := validateRemappedLocalPath(cleanLocal, remappedLocal, []string{cleanRemote}); err != nil {
+			return "", err
+		}
+		return filepath.FromSlash(filepath.Clean(remappedLocal)), nil
+	}
 
-	deglobbedLocal := strings.TrimSuffix(cleanLocal, string(metachar))
-	return filepath.FromSlash(filepath.Clean(deglobbedLocal + rel)), nil
+	trimmed := strings.TrimPrefix(cleanRemote, remotePrefix)
+	trimmed = strings.TrimPrefix(trimmed, "/")
+	remappedLocal := joinPrefixAndDelta(localPrefix, trimmed)
+	if err := validateRemappedLocalPath(cleanLocal, remappedLocal, []string{trimmed}); err != nil {
+		return "", err
+	}
+	return filepath.FromSlash(filepath.Clean(remappedLocal)), nil
 }
 
 func containsMetachar(p string) bool {
 	return strings.Contains(p, string(metachar))
 }
 
+func isAbsolutePath(p string) bool {
+	// filepath.IsAbs has platform dependent behavior, so we implement our own check that works for both Windows and Unix-style paths.
+	// This doesn't cover UNC paths, but that will be fine for now
+	normalised := ForceToSlash(p)
+	if strings.HasPrefix(normalised, "/") {
+		return true
+	}
+	if len(normalised) >= 3 && unicode.IsLetter(rune(normalised[0])) && normalised[1] == ':' && normalised[2] == '/' {
+		return true
+	}
+	return false
+}
+
+func validateRemappedLocalPath(localTemplate string, remappedLocal string, pathParts []string) error {
+	for _, pathPart := range pathParts {
+		if containsParentPathSegment(pathPart) {
+			return message.New(message.EnginePathRemapPathTraversal).WithMetadata(map[string]string{
+				"remappedPath":  remappedLocal,
+				"pathComponent": pathPart,
+			})
+		}
+	}
+
+	if isAbsolutePath(localTemplate) {
+		return nil
+	}
+
+	cleanedRemappedLocal := ForceToSlash(filepath.Clean(remappedLocal))
+	if isAbsolutePath(cleanedRemappedLocal) {
+		return message.New(message.EnginePathRemapRelativeTemplateAbsolutePath).WithMetadata(map[string]string{
+			"remappedPath":  remappedLocal,
+			"localTemplate": localTemplate,
+		})
+	}
+	if cleanedRemappedLocal == ".." || strings.HasPrefix(cleanedRemappedLocal, "../") {
+		return message.New(message.EnginePathRemapRelativeTemplateBaseEscape).WithMetadata(map[string]string{
+			"remappedPath":  remappedLocal,
+			"localTemplate": localTemplate,
+		})
+	}
+
+	return nil
+}
+
+func containsParentPathSegment(p string) bool {
+	for _, segment := range strings.Split(p, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func ForceToSlash(p string) string {
 	return strings.ReplaceAll(p, `\`, "/")
+}
+
+// CanonicalPath returns an absolute path and resolves symlinks when possible.
+// If symlink evaluation fails, the absolute path is returned as a best effort.
+func CanonicalPath(path string) string {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return absPath
+	}
+	return resolvedPath
 }
 
 // MatchesAny checks whether the file path matches any of the specified globbed patterns.

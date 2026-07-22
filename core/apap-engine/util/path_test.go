@@ -4,7 +4,6 @@
 package util
 
 import (
-	"fmt"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -12,6 +11,8 @@ import (
 	"github.com/bmatcuk/doublestar"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 )
 
 func TestExpandGlob_GlobBase_NoEffectWithNoGlob(t *testing.T) {
@@ -163,70 +164,44 @@ func TestMatchesAny(t *testing.T) {
 	}
 }
 
-func TestExpandGlob_GlobBase_RequiresAndStripsSingleTrailingStar(t *testing.T) {
+func TestExpandGlob_GlobBase_RemapsMatchingWildcardTemplate(t *testing.T) {
 	got, err := RemapGlobbedPath(
-		filepath.FromSlash("tool/0/*"),
+		filepath.FromSlash("tool/0/**/*"),
 		filepath.FromSlash("expanded/base/tool/0/inner/myFile"),
 		filepath.FromSlash("expanded/base/tool/0/**/*"),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.FromSlash("tool/0/inner/myFile"), got) // stripped "/*", then + delta
+	assert.Equal(t, filepath.FromSlash("tool/0/inner/myFile"), got)
 }
 
-func TestExpandGlob_GlobBase_RemoteEqualsBase_NoDelta_StripsStarOnly(t *testing.T) {
+func TestExpandGlob_GlobBase_SameSuffixRemaps(t *testing.T) {
 	got, err := RemapGlobbedPath(
-		filepath.FromSlash("foo/bar/*"),
-		filepath.FromSlash("a/b/c"),
-		filepath.FromSlash("a/b/c*"),
+		filepath.FromSlash("tool/output/deeper/**/*"),
+		filepath.FromSlash("expanded/base/deeper/stuff.txt"),
+		filepath.FromSlash("expanded/base/deeper/**/*"),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.FromSlash("foo/bar"), got) // only strip trailing "/*"
-}
-
-func TestExpandGlob_GlobBase_Err_WhenSrcDoesNotEndWithSingleStar(t *testing.T) {
-	cases := []string{
-		"tool/*/end", // star not at the very end
-		"tool/0/**",  // double star not allowed
-		"tool/0/*/",  // trailing slash after star
-		"tool/0/*x",  // star followed by another char
-		"tool/0/",    // no star at all
-		"tool/0",     // no star at all
-	}
-	for _, src := range cases {
-		t.Run(src, func(t *testing.T) {
-			_, err := RemapGlobbedPath(
-				filepath.FromSlash(src),
-				filepath.FromSlash("expanded/base/tool/0/inner/myFile"),
-				filepath.FromSlash("expanded/base/tool/0/**/*"),
-			)
-			require.Error(t, err)
-		})
-	}
+	assert.Equal(t, filepath.FromSlash("tool/output/deeper/stuff.txt"), got)
 }
 
 func TestExpandGlob_RemoteNotUnderBase_Err(t *testing.T) {
 	_, err := RemapGlobbedPath(
-		filepath.FromSlash("tool/0/*"),
+		filepath.FromSlash("tool/0/**/*"),
 		filepath.FromSlash("elsewhere/tool/0/inner/myFile"),
 		filepath.FromSlash("expanded/base/tool/0/**/*"),
 	)
-	require.ErrorContains(t, err, "does not match remote base pattern")
-}
-
-func TestExpandGlob_MidpathGlobBaseExtraction_StripsStarAndAppendsDelta(t *testing.T) {
-	got, err := RemapGlobbedPath(
-		filepath.FromSlash("local/base*"),
-		filepath.FromSlash("r/base/fixed/deeper/filea"),
-		filepath.FromSlash("r/base*/**/*"),
-	)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.FromSlash("local/base/fixed/deeper/filea"), got)
+	expected := message.New(message.EnginePathRemapRemotePathPatternMismatch).WithMetadata(map[string]string{
+		"remotePath": "elsewhere/tool/0/inner/myFile",
+		"remoteBase": "expanded/base/tool/0/**/*",
+	})
+	require.ErrorIs(t, err, expected)
+	require.NoError(t, message.ValidateMetadataPlaceholders(err))
 }
 
 func TestExpandGlob_AbsolutePath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		got, err := RemapGlobbedPath(
-			filepath.FromSlash("c:/local/*"),
+			filepath.FromSlash("c:/local/**/*"),
 			filepath.FromSlash("/r/base/fixed/deeper/file.txt"),
 			filepath.FromSlash("/r/base/fixed/**/*"),
 		)
@@ -234,7 +209,7 @@ func TestExpandGlob_AbsolutePath(t *testing.T) {
 		assert.Equal(t, filepath.FromSlash("c:/local/deeper/file.txt"), got)
 	} else {
 		got, err := RemapGlobbedPath(
-			filepath.FromSlash("/local/*"),
+			filepath.FromSlash("/local/**/*"),
 			filepath.FromSlash("/r/base/fixed/deeper/file.txt"),
 			filepath.FromSlash("/r/base/fixed/**/*"),
 		)
@@ -243,6 +218,8 @@ func TestExpandGlob_AbsolutePath(t *testing.T) {
 	}
 }
 
+// TestRemapGlobbedPath verifies that local and remoteBase share the same wildcard-containing suffix
+// starting at the first wildcard-containing segment, and only their concrete prefixes may differ.
 func TestRemapGlobbedPath(t *testing.T) {
 	testCases := []struct {
 		name       string
@@ -251,6 +228,8 @@ func TestRemapGlobbedPath(t *testing.T) {
 		remoteBase string
 		want       string
 		wantErr    string
+		wantMsg    message.MessageCode
+		wantMeta   map[string]string
 	}{
 		{
 			name:       "fails if any arg contains unsupported metachars",
@@ -288,129 +267,281 @@ func TestRemapGlobbedPath(t *testing.T) {
 			wantErr:    "remote base is concrete, but local path",
 		},
 		{
-			name:       "fails if remote base is globbed, but local is concrete",
+			name:       "fails if remote base is globbed, but local has no wildcards",
 			local:      "a/b",
 			remote:     "one/two/three/four",
 			remoteBase: "one/two/three/*",
-			wantErr:    "must contain exactly 1 '*'",
+			wantMsg:    message.EnginePathRemapWildcardSuffixMismatch,
+			wantMeta: map[string]string{
+				"localPath":  "a/b",
+				"remoteBase": "one/two/three/*",
+			},
 		},
 		{
-			name:       "fails if local has more than 1 star",
+			name:       "fails if local has extra wildcards",
 			local:      "a/b/**/*",
 			remote:     "one/two/three/four",
 			remoteBase: "one/two/three/*",
-			wantErr:    "must contain exactly 1 '*'",
+			wantMsg:    message.EnginePathRemapWildcardSuffixMismatch,
+			wantMeta: map[string]string{
+				"localPath":  "a/b/**/*",
+				"remoteBase": "one/two/three/*",
+			},
 		},
 		{
-			name:       "fails if remote base is globbed, but local doesn't end in a star",
-			local:      "a/b/**/c",
-			remote:     "one/two/three/four",
-			remoteBase: "one/two/three/*",
-			wantErr:    "must contain exactly 1 '*', at its end",
-		},
-		{
-			name:       "fails if metachars in remotePath aren't exclusively a suffix",
+			name:       "fails if wildcard sequence differs for mid-path wildcards",
 			local:      "a/b/*",
 			remote:     "one/two/three/four",
 			remoteBase: "one/*/three/*",
-			wantErr:    "contains literal characters after the first '*'",
+			wantMsg:    message.EnginePathRemapWildcardSuffixMismatch,
+			wantMeta: map[string]string{
+				"localPath":  "a/b/*",
+				"remoteBase": "one/*/three/*",
+			},
 		},
 		{
 			name:       "fails if remote doesn't match remoteBase (1)",
 			local:      "a/b/*",
 			remote:     "x/y",
 			remoteBase: "one/two/*",
-			wantErr:    "does not match remote base pattern",
+			wantMsg:    message.EnginePathRemapRemotePathPatternMismatch,
+			wantMeta: map[string]string{
+				"remotePath": "x/y",
+				"remoteBase": "one/two/*",
+			},
 		},
 		{
 			name:       "fails if remote doesn't match remoteBase (2)",
 			local:      "a/b/*",
 			remote:     "one/two/three/four",
 			remoteBase: "one/two/*",
-			wantErr:    "does not match remote base pattern",
+			wantMsg:    message.EnginePathRemapRemotePathPatternMismatch,
+			wantMeta: map[string]string{
+				"remotePath": "one/two/three/four",
+				"remoteBase": "one/two/*",
+			},
 		},
 		{
-			name:       "success case A",
-			local:      "one/two/t*",
-			remote:     "one/two/three/four/five/six/seven",
-			remoteBase: "one/two/th*/**/*",
-			want:       "one/two/tree/four/five/six/seven",
+			name:       "fails when single star would need to cross path segments",
+			local:      "out/*/b",
+			remote:     "a/u/v/b",
+			remoteBase: "a/*/b",
+			wantMsg:    message.EnginePathRemapRemotePathPatternMismatch,
+			wantMeta: map[string]string{
+				"remotePath": "a/u/v/b",
+				"remoteBase": "a/*/b",
+			},
 		},
 		{
-			name:       "success case B",
-			local:      "one/two/*",
-			remote:     "one/two/threefourfive",
-			remoteBase: "one/two/th*",
-			want:       "one/two/reefourfive",
+			name:       "fails when wildcard capture contains parent traversal",
+			local:      "out/*",
+			remote:     "..",
+			remoteBase: "*",
+			wantMsg:    message.EnginePathRemapPathTraversal,
+			wantMeta: map[string]string{
+				"remappedPath":  "out/..",
+				"pathComponent": "..",
+			},
 		},
 		{
-			name:       "cleans paths",
-			local:      "one/two*",
-			remote:     "one/two/three/fourfive",
-			remoteBase: "one/////two//thr*///**/*",
-			want:       "one/twoee/fourfive",
+			name:       "fails when remote and remote base use different coordinate spaces",
+			local:      "mirror/**/counter.parquet",
+			remote:     "/tmp/out/counter.parquet",
+			remoteBase: "**/counter.parquet",
+			wantMsg:    message.EnginePathRemapCoordinateSpaceMismatch,
+			wantMeta: map[string]string{
+				"remotePath": "/tmp/out/counter.parquet",
+				"remoteBase": "**/counter.parquet",
+			},
 		},
 		{
-			name:       "handles pre-glob base matching the globbed path prefix",
-			local:      "some/thing_*",
-			remote:     "some/thing/thing_b",
-			remoteBase: "some/thing/*",
-			want:       "some/thing_thing_b",
+			name:       "fails when double star capture contains parent traversal segment",
+			local:      "out/**/counter.parquet",
+			remote:     "../safe/counter.parquet",
+			remoteBase: "**/counter.parquet",
+			wantMsg:    message.EnginePathRemapPathTraversal,
+			wantMeta: map[string]string{
+				"remappedPath":  "out/../safe/counter.parquet",
+				"pathComponent": "../safe/counter.parquet",
+			},
+		},
+		{
+			name:       "fails when relative local template resolves outside its base path",
+			local:      "../mirror/**/*",
+			remote:     "out/x/y",
+			remoteBase: "out/**/*",
+			wantMsg:    message.EnginePathRemapRelativeTemplateBaseEscape,
+			wantMeta: map[string]string{
+				"remappedPath":  "../mirror/x/y",
+				"localTemplate": "../mirror/**/*",
+			},
+		},
+		{
+			name:       "remaps mirrored single star suffix",
+			local:      "output/sources-capture-periodic_sampling*",
+			remote:     "tmp/out/sources-capture-periodic_sampling-libc.so.6.csv",
+			remoteBase: "tmp/out/sources-capture-periodic_sampling*",
+			want:       "output/sources-capture-periodic_sampling-libc.so.6.csv",
+		},
+		{
+			name:       "remaps mirrored doublestar suffix",
+			local:      "capture.apc/**/*",
+			remote:     "tmp/out/db/image-metadata/bash/functions.bin",
+			remoteBase: "tmp/out/**/*",
+			want:       "capture.apc/db/image-metadata/bash/functions.bin",
+		},
+		{
+			name:       "remaps root-anchored wildcard suffix into relative local prefix",
+			local:      "mirror/**/*",
+			remote:     "/x/y",
+			remoteBase: "/**/*",
+			want:       "mirror/x/y",
+		},
+		{
+			name:       "remaps mirrored structured suffix",
+			local:      "output/parquet/timeline/series_id=*/bin_duration=*/counter.parquet",
+			remote:     "tmp/out/report-new/apx/timeline/series_id=22/bin_duration=1000000000/counter.parquet",
+			remoteBase: "tmp/out/report-new/apx/timeline/series_id=*/bin_duration=*/counter.parquet",
+			want:       "output/parquet/timeline/series_id=22/bin_duration=1000000000/counter.parquet",
+		},
+		{
+			name:       "remaps mirrored doublestar with zero dirs",
+			local:      "mirror/**/target",
+			remote:     "out/target",
+			remoteBase: "out/**/target",
+			want:       "mirror/target",
+		},
+		{
+			name:       "fails when local wildcard suffix is concrete",
+			local:      "output/result.csv",
+			remote:     "tmp/out/result.csv",
+			remoteBase: "tmp/out/*.csv",
+			wantMsg:    message.EnginePathRemapWildcardSuffixMismatch,
+			wantMeta: map[string]string{
+				"localPath":  "output/result.csv",
+				"remoteBase": "tmp/out/*.csv",
+			},
+		},
+		{
+			name:       "fails when local wildcard suffix text differs",
+			local:      "output/bar-*.csv",
+			remote:     "tmp/out/foo-a.csv",
+			remoteBase: "tmp/out/foo-*.csv",
+			wantMsg:    message.EnginePathRemapWildcardSuffixMismatch,
+			wantMeta: map[string]string{
+				"localPath":  "output/bar-*.csv",
+				"remoteBase": "tmp/out/foo-*.csv",
+			},
+		},
+		{
+			name:       "fails when wildcard segment layout differs",
+			local:      "capture.apc/*",
+			remote:     "tmp/out/db/image-metadata/bash/functions.bin",
+			remoteBase: "tmp/out/**/*",
+			wantMsg:    message.EnginePathRemapWildcardSuffixMismatch,
+			wantMeta: map[string]string{
+				"localPath":  "capture.apc/*",
+				"remoteBase": "tmp/out/**/*",
+			},
+		},
+		{
+			name:       "fails when local changes trailing literal after wildcard segment",
+			local:      "output/a/*/c",
+			remote:     "tmp/out/a/value/b",
+			remoteBase: "tmp/out/a/*/b",
+			wantMsg:    message.EnginePathRemapWildcardSuffixMismatch,
+			wantMeta: map[string]string{
+				"localPath":  "output/a/*/c",
+				"remoteBase": "tmp/out/a/*/b",
+			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := RemapGlobbedPath(filepath.FromSlash(tc.local), filepath.FromSlash(tc.remote), filepath.FromSlash(tc.remoteBase))
-			if tc.wantErr != "" {
-				assert.Error(t, err, "expected error, got nil")
-				assert.ErrorContains(t, err, tc.wantErr, fmt.Sprintf("'%v' does not contain expected error '%v'", err, tc.wantErr))
+			if tc.wantMsg != "" {
+				expected := message.New(tc.wantMsg).WithMetadata(tc.wantMeta)
+				require.ErrorIs(t, err, expected)
+				require.NoError(t, message.ValidateMetadataPlaceholders(err))
+			} else if tc.wantErr != "" {
+				require.Error(t, err, "expected error, got nil")
+				require.ErrorContains(t, err, tc.wantErr)
 			} else {
-				assert.NoError(t, err, "expected no error, got '%v'", err)
+				require.NoError(t, err, "expected no error, got '%v'", err)
 			}
 
 			if tc.want != "" {
-				assert.Equal(t, filepath.FromSlash(tc.want), got, fmt.Sprintf("want '%v', got '%v'", tc.want, got))
+				assert.Equal(t, filepath.FromSlash(tc.want), got)
 			}
 		})
 	}
 }
 
-func TestRemapGlobbedPath_CrossPlatform(t *testing.T) {
-	t.Run("force POSIX-style target succeeds", func(t *testing.T) {
-		var localPath string
-		var want string
-		if runtime.GOOS == "windows" {
-			localPath = `C:\one\two*`
-			want = `C:\one\twoee\four\five`
-		} else {
-			localPath = "/one/two*"
-			want = "/one/twoee/four/five"
-		}
-		got, err := RemapGlobbedPath(
-			localPath,
-			"one/two/three/four/five",
-			"one/two/thr*/*/*",
-		)
-		require.NoError(t, err)
-		assert.Equal(t, want, got)
+func TestRemapGlobbedPath_CrossPlatformSuffix(t *testing.T) {
+	var local, remote, remoteBase, want string
+	if runtime.GOOS == "windows" {
+		local = `C:\one\two\**\*`
+		remote = `C:\one\two\three\four\five`
+		remoteBase = `C:\one\two\**\*`
+		want = `C:\one\two\three\four\five`
+	} else {
+		local = "/one/two/**/*"
+		remote = "/one/two/three/four/five"
+		remoteBase = "/one/two/**/*"
+		want = "/one/two/three/four/five"
+	}
+	got, err := RemapGlobbedPath(local, remote, remoteBase)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestRemapGlobbedPath_MixedSeparatorSuffix(t *testing.T) {
+	var local, remote, remoteBase, want string
+	if runtime.GOOS == "windows" {
+		local = `C:\mirror/**/*`
+		remote = "mirror\\dir/sub\\file.txt"
+		remoteBase = "mirror/**/*"
+		want = filepath.FromSlash("C:/mirror/dir/sub/file.txt")
+	} else {
+		local = "/mirror/**/*"
+		remote = "mirror\\dir/sub\\file.txt"
+		remoteBase = "mirror/**/*"
+		want = filepath.FromSlash("/mirror/dir/sub/file.txt")
+	}
+	got, err := RemapGlobbedPath(local, remote, remoteBase)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestValidateRemappedLocalPath(t *testing.T) {
+	t.Run("fails when relative local template resolves to an absolute path", func(t *testing.T) {
+		err := validateRemappedLocalPath("**/*", "/x/y", []string{"safe"})
+		expected := message.New(message.EnginePathRemapRelativeTemplateAbsolutePath).WithMetadata(map[string]string{
+			"remappedPath":  "/x/y",
+			"localTemplate": "**/*",
+		})
+		require.ErrorIs(t, err, expected)
+		require.NoError(t, message.ValidateMetadataPlaceholders(err))
 	})
-	t.Run("force windows-style target succeeds", func(t *testing.T) {
-		var localPath string
-		var want string
-		if runtime.GOOS == "windows" {
-			localPath = `C:\some\path*`
-			want = `C:\some\paththis\is\a\path.txt`
-		} else {
-			localPath = "/some/path*"
-			want = "/some/paththis/is/a/path.txt"
-		}
-		got, err := RemapGlobbedPath(
-			localPath,
-			`C:\this\is\a\path.txt`,
-			`C:\**\*`,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, want, got)
+}
+
+func TestIsAbsolutePath(t *testing.T) {
+	t.Run("treats slash-rooted paths as absolute", func(t *testing.T) {
+		require.True(t, isAbsolutePath("/x/y"))
 	})
+
+	t.Run("treats drive-rooted paths as absolute", func(t *testing.T) {
+		require.True(t, isAbsolutePath("C:/x/y"))
+	})
+}
+
+func TestValidateRemappedLocalPath_DriveAbsolute(t *testing.T) {
+	err := validateRemappedLocalPath("**/*", "C:/x/y", []string{"safe"})
+	expected := message.New(message.EnginePathRemapRelativeTemplateAbsolutePath).WithMetadata(map[string]string{
+		"remappedPath":  "C:/x/y",
+		"localTemplate": "**/*",
+	})
+	require.ErrorIs(t, err, expected)
+	require.NoError(t, message.ValidateMetadataPlaceholders(err))
 }

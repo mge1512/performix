@@ -13,15 +13,17 @@ rubrics.
 ## Python Environment
 
 Prepare the core checkout, then run the suite through the repository Taskfile
-entrypoint from the repository root:
+entrypoint from the repository root (stopping any existing daemons first):
 
 ```bash
+task core:stop
 task core:install
 task core:test:eval:ai-insights
 ```
 
-The evaluation task prepares its Python virtual environment and invokes the AI
-Insights pytest suite with the CLI at `core/apap-cli/apx`. The pytest suite defaults to
+The evaluation task prepares its Python virtual environment, invokes the AI
+Insights pytest suite with the CLI at `core/apap-cli/apx`, and generates local
+performance reports. The pytest suite defaults to
 `$HOME/.cache/performix/ai-insights-evaluation/pre-recorded-runs` as
 the local pre-recorded run cache, and downloads missing inputs from
 `its.apx-prerecorded-runs/ai-insights-evaluation` using
@@ -150,6 +152,21 @@ managed-runtime stack collection flags, are defined in
 `ai_insights_evaluation.json`. `prerecord-run.py` applies those
 parameters automatically for the selected testcase.
 
+Optional MCP performance thresholds are also defined per test. A testcase must
+specify all three thresholds in `ai_insights_evaluation.json` to enable its
+performance assessment:
+
+```json
+{
+  "id": "test_case_01",
+  "performance_thresholds": {
+    "duration_seconds": 90,
+    "input_tokens": 1500,
+    "output_tokens": 1200
+  }
+}
+```
+
 Each manifest entry must define a non-empty `summary` field. Pytest
 uses this only when generating readable test item names; run artifact
 paths, imported run cache keys, result directories, and model prompts
@@ -218,6 +235,13 @@ example, the GitHub summary groups `Result`, `Runtime`, and `Details`
 under `Hackathon MCP` and `Performix MCP`, with result cells rendered as
 `✅ **PASS** (high)` or `❌ **FAIL** (high)`.
 
+For `performix_mcp` attempts, the summary also reports the performance
+quality checks used by benchmark reporting. The checks compare runtime,
+input tokens, and output tokens against the testcase's `performance_thresholds`
+in `ai_insights_evaluation.json`. A POOR or INDETERMINABLE result fails the
+pytest testcase. Testcases without a complete threshold set skip performance
+assessment.
+
 Use `--ai-attempts N` or `AI_INSIGHTS_ATTEMPTS=N` to run multiple
 attempts. Attempts are pytest parameters, so each attempt is collected,
 reported, and recorded as a separate pytest item.
@@ -227,24 +251,33 @@ OpenAI Responses API. The per-test summary reports the value sent as
 `rest_reasoning=<value>`. If `--ai-reasoning-effort` is omitted, the
 manifest model config supplies the value.
 
-The same per-test properties are also visible to standard pytest
-reporting tools, especially JUnit XML:
+Pytest records the thresholds and resulting performance quality alongside the
+observed metrics in JUnit XML. The task uses `ai_insights_performance_report.py`
+to generate the same benchmark-reporting and dashboard data formats used in CI.
+Reports are generated even when pytest fails, provided pytest produced JUnit XML.
+The task preserves pytest's failure status after generating the reports.
 
-```bash
-task core:test:eval:ai-insights -- \
-  --junitxml=ai-insights-evaluation.xml \
-  -o junit_family=legacy
-```
+Local reporting outputs are written to:
+
+- `results/reporting/ai-insights-evaluation.xml`
+- `results/reporting/payload/metadata.json`
+- `results/reporting/payload/reports/ai_insights_performance.json`
+- `results/reporting/ai-insights-performance-dashboard.json`
+
+The reporting directory is replaced at the start of each invocation so stale
+JUnit data cannot be mistaken for the latest run.
 
 Recorded properties include the testcase id, mode, attempt number,
 attempt count, pass rate, imported run id, archive SHA256, agent
 duration, token counts, MCP call count, scores, judge labels, and paths
 to the attempt artefacts such as `llm_response.md`, `score.md`,
-`score.json`, and `invoke_metadata.json`. Suite-level properties record
-the model, reasoning effort, judge model, manifest path, and results
-directory once per pytest run. `record_property` and
-`record_testsuite_property` are pytest's standard metadata mechanisms,
-but JUnit XML properties require `junit_family=legacy` or
+`score.json`, and `invoke_metadata.json`. For performance-evaluated attempts
+(i.e. in performix_mcp mode), they also include the performance thresholds
+and GOOD/POOR/INDETERMINABLE classification for runtime, input tokens, and
+output tokens. Suite-level properties record the model, reasoning effort,
+judge model, manifest path, and results directory once per pytest run.
+`record_property` and `record_testsuite_property` are pytest's standard metadata
+mechanisms, but JUnit XML properties require `junit_family=legacy` or
 `junit_family=xunit1`.
 
 Failed evaluations use pytest assertion messages to report the failed

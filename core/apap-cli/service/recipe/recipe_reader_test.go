@@ -36,8 +36,8 @@ type MockRecipeParser struct {
 	mock.Mock
 }
 
-func (m *MockRecipeParser) ParseRecipe(content string) (engine_recipe.Recipe, error) {
-	args := m.Called(content)
+func (m *MockRecipeParser) ParseRecipe(sourceName string, content string) (engine_recipe.Recipe, error) {
+	args := m.Called(sourceName, content)
 	return args.Get(0).(engine_recipe.Recipe), args.Error(1)
 }
 
@@ -65,8 +65,8 @@ func TestReadRecipes(t *testing.T) {
 
 		cpuMicroarchitectureParsedRecipe := engine_recipe.Recipe{Name: cpuMicroarchitectureName, Description: cpuMicroarchitectureDesc, Version: cpuMicroarchitectureVer}
 		hotspotParsedRecipe := engine_recipe.Recipe{Name: hotspotName, Description: hotspotDesc, Version: hotspotVer}
-		parser.On("ParseRecipe", cpuMicroarchitectureJSContents).Return(cpuMicroarchitectureParsedRecipe, nil)
-		parser.On("ParseRecipe", hotspotJSContents).Return(hotspotParsedRecipe, nil)
+		parser.On("ParseRecipe", "cpu_microarchitecture.js", cpuMicroarchitectureJSContents).Return(cpuMicroarchitectureParsedRecipe, nil)
+		parser.On("ParseRecipe", "hotspot.js", hotspotJSContents).Return(hotspotParsedRecipe, nil)
 
 		// Error handler shouldn't be called in good path
 		errHandler := func(filename string, err error) {
@@ -93,7 +93,7 @@ func TestReadRecipes(t *testing.T) {
 		reader.On("ReadFile", "hotspot.js").Return([]byte(nil), readFileError)
 
 		cpuMicroarchitectureParsedRecipe := engine_recipe.Recipe{Name: cpuMicroarchitectureName, Description: cpuMicroarchitectureDesc, Version: cpuMicroarchitectureVer}
-		parser.On("ParseRecipe", cpuMicroarchitectureJSContents).Return(cpuMicroarchitectureParsedRecipe, nil)
+		parser.On("ParseRecipe", "cpu_microarchitecture.js", cpuMicroarchitectureJSContents).Return(cpuMicroarchitectureParsedRecipe, nil)
 
 		var handlerErrs []error
 		errHandler := func(filename string, err error) {
@@ -132,8 +132,8 @@ func TestReadRecipes(t *testing.T) {
 		cpuMicroarchitectureParsedRecipe := engine_recipe.Recipe{Name: cpuMicroarchitectureName, Description: cpuMicroarchitectureDesc, Version: cpuMicroarchitectureVer}
 		hotspotParsedRecipe := engine_recipe.Recipe{Name: cpuMicroarchitectureName, Description: hotspotDesc, Version: hotspotVer}
 
-		parser.On("ParseRecipe", cpuMicroarchitectureJSContents).Return(cpuMicroarchitectureParsedRecipe, nil)
-		parser.On("ParseRecipe", hotspotJSContents).Return(hotspotParsedRecipe, nil)
+		parser.On("ParseRecipe", "cpu_microarchitecture.js", cpuMicroarchitectureJSContents).Return(cpuMicroarchitectureParsedRecipe, nil)
+		parser.On("ParseRecipe", "hotspot.js", hotspotJSContents).Return(hotspotParsedRecipe, nil)
 
 		var handlerErrs []error
 		errHandler := func(_ string, err error) {

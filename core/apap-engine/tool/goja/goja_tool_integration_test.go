@@ -577,10 +577,12 @@ let tool = {
 				run: async (engine, ctx) => {
 				const hostEngine = engine.withLocality("host");
 				hostToolsRoot = hostEngine.toolsRoot();
+				hostLocality = hostEngine.getLocality();
 				await hostEngine.execCommand(["/bin/true"], {});
 
 				const targetEngine = hostEngine.withLocality("target");
 				targetToolsRoot = targetEngine.toolsRoot();
+				targetLocality = targetEngine.getLocality();
 				await targetEngine.execCommand(["/bin/echo", "target"], {});
 			},
 		` + ToolSourceEnd
@@ -596,13 +598,13 @@ let tool = {
 
 		ti, err := LoadFromSourceNoError(t, toolSource).NewIntegration(&tool.IntegrationContext{
 			Ctx:                   context.Background(),
-			DefaultEngineLocality: tool.EngineLocality{Engine: targetEngine},
+			DefaultEngineLocality: tool.EngineLocality{Name: "target", Engine: targetEngine},
 			ResolveLocality: func(name string) (tool.EngineLocality, error) {
 				switch name {
 				case "target":
-					return tool.EngineLocality{Engine: targetEngine, ToolsRoot: "/target/tools"}, nil
+					return tool.EngineLocality{Name: "target", Engine: targetEngine, ToolsRoot: "/target/tools"}, nil
 				case "host":
-					return tool.EngineLocality{Engine: hostEngine, ToolsRoot: "/host/tools"}, nil
+					return tool.EngineLocality{Name: "host", Engine: hostEngine, ToolsRoot: "/host/tools"}, nil
 				default:
 					return tool.EngineLocality{}, errors.New("unsupported locality")
 				}
@@ -617,6 +619,8 @@ let tool = {
 
 		assert.Equal(t, "/host/tools", ti.(*GojaToolInstance).asyncHelper.Vm.Get("hostToolsRoot").String())
 		assert.Equal(t, "/target/tools", ti.(*GojaToolInstance).asyncHelper.Vm.Get("targetToolsRoot").String())
+		assert.Equal(t, "host", ti.(*GojaToolInstance).asyncHelper.Vm.Get("hostLocality").String())
+		assert.Equal(t, "target", ti.(*GojaToolInstance).asyncHelper.Vm.Get("targetLocality").String())
 		targetEngine.AssertExpectations(t)
 		hostEngine.AssertExpectations(t)
 	})
@@ -1197,6 +1201,57 @@ let tool = {
 
 		m.AssertExpectations(t)
 	})
+
+	t.Run("ToolInstance copyFrom forwards source and destination localities", func(t *testing.T) {
+		const suffix = `
+			run: async (engine, ctx) => {
+				await engine.withLocality("host").copyFrom("target", "/remote/file", "/local/file")
+			},
+		`
+		var sourceLocality string
+		var destinationLocality string
+		var sourcePath string
+		var destinationPath string
+
+		src := ToolSourceBegin + suffix + ToolSourceEnd
+		m := &tool_mocks.MockEngineContext{}
+		ti, err := LoadFromSourceNoError(t, src).NewIntegration(&tool.IntegrationContext{
+			Ctx:                   context.Background(),
+			DefaultEngineLocality: tool.EngineLocality{Engine: m, ToolsRoot: "/target/tools"},
+			ResolveLocality: func(name string) (tool.EngineLocality, error) {
+				switch name {
+				case "target":
+					return tool.EngineLocality{Engine: m, ToolsRoot: "/target/tools"}, nil
+				case "host":
+					return tool.EngineLocality{
+						Engine:    m,
+						ToolsRoot: "/host/tools",
+						CopyFrom: func(source string, sourceFile string, destinationFile string) error {
+							sourceLocality = source
+							destinationLocality = name
+							sourcePath = sourceFile
+							destinationPath = destinationFile
+							return nil
+						},
+					}, nil
+				default:
+					return tool.EngineLocality{}, errors.New("unsupported locality")
+				}
+			},
+		})
+		require.NoError(t, err)
+
+		ah := &ti.(*GojaToolInstance).asyncHelper
+
+		ah.StartLoop()
+		require.NoError(t, ti.Run())
+		ah.StopLoop()
+
+		assert.Equal(t, "target", sourceLocality)
+		assert.Equal(t, "host", destinationLocality)
+		assert.Equal(t, "/remote/file", sourcePath)
+		assert.Equal(t, "/local/file", destinationPath)
+	})
 }
 
 func TestLoadFromSourceSupportsRequire(t *testing.T) {
@@ -1239,6 +1294,56 @@ let tool = {
 	props := ti.Properties()
 	assert.Equal(t, "Helper short", props.ShortDescription)
 	assert.Equal(t, "Helper long", props.LongDescription)
+}
+
+func TestLoadFromSourceSupportsRequireViaSymlink(t *testing.T) {
+	baseDir := t.TempDir()
+	realDir := filepath.Join(baseDir, "real")
+	linkDir := filepath.Join(baseDir, "links")
+	require.NoError(t, os.Mkdir(realDir, 0o700))
+	require.NoError(t, os.Mkdir(linkDir, 0o700))
+
+	helperPath := filepath.Join(realDir, "utils.js")
+	helperSource := `module.exports = {
+	buildDescriptions: function() {
+		return { short: "Symlink short", long: "Symlink long" };
+	}
+};`
+	require.NoError(t, os.WriteFile(helperPath, []byte(helperSource), 0o600))
+
+	toolSource := `const helper = require("./utils");
+let tool = {
+	name: "require-tool",
+	version: "0.1.0",
+	supportsWorkloadLaunch: false,
+	deployments: [{
+		appliesTo: [
+			{architecture: "x86_64", os: "Linux"}
+		],
+		dependencies: [],
+	}],
+	description: helper.buildDescriptions(),
+	probe: (engine, ctx) => ({available: true, capabilities: {}, advice: []}),
+	run: (engine, ctx) => {},
+	reformat: (engine, ctx) => {},
+	onCancel: (engine, ctx) => {},
+	onStop: (engine, ctx) => {},
+};`
+
+	toolPath := filepath.Join(realDir, "require-tool.js")
+	toolLinkPath := filepath.Join(linkDir, "require-tool.js")
+	require.NoError(t, os.WriteFile(toolPath, []byte(toolSource), 0o600))
+	require.NoError(t, os.Symlink(toolPath, toolLinkPath))
+
+	sts, err := LoadFromSource(toolSource, toolLinkPath)
+	require.NoError(t, err)
+
+	ti, err := sts.NewIntegration(integrationContext(&tool.AgentEngine{}, nil))
+	require.NoError(t, err)
+
+	props := ti.Properties()
+	assert.Equal(t, "Symlink short", props.ShortDescription)
+	assert.Equal(t, "Symlink long", props.LongDescription)
 }
 
 func TestLoadSysutilTimelineIntegrationUsesEngineVersionedBundle(t *testing.T) {

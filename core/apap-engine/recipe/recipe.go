@@ -56,5 +56,5 @@ type Recipe struct {
 }
 
 type Parser interface {
-	ParseRecipe(string) (Recipe, error)
+	ParseRecipe(sourceName string, content string) (Recipe, error)
 }

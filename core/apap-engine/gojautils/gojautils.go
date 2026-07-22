@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -421,7 +421,7 @@ func (ah *AsyncHelper) CallScriptedFunction(stage func(goja.FunctionCall) goja.V
 //
 // Captures: func (1), file (2), line (3), col (4).
 var jsTopFrameRegex = regexp.MustCompile(
-	`(?m)^\s*at\s+(?:(\S+)\s+\()?([^():\s]+|<eval>|<anonymous>):(\d+):(\d+)(?:\(\d+\))?\)?$`,
+	`(?m)^\s*at\s+(?:(\S+)\s+\()?(.+?):(\d+):(\d+)(?:\(\d+\))?\)?$`,
 )
 
 // ScriptStackEntry is one JS stack frame.
@@ -487,7 +487,7 @@ func (ah *AsyncHelper) parseAndAdjustFrame(line string) (ScriptStackEntry, bool)
 	if src == "" {
 		src = fileName
 	} else {
-		src = filepath.Base(src)
+		src = path.Base(strings.ReplaceAll(src, `\`, `/`))
 	}
 
 	return ScriptStackEntry{

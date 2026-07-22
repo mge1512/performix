@@ -8,10 +8,19 @@ import (
 	"sync"
 )
 
+const (
+	LocalityTarget = "target"
+	LocalityHost   = "host"
+)
+
+type CopyFromFunc func(sourceLocality string, sourcePath string, destinationPath string) error
+
 type EngineLocality struct {
+	Name          string
 	Engine        Engine
 	FileCollector FileCollector
 	ToolsRoot     string
+	CopyFrom      CopyFromFunc
 }
 
 type EngineLocalityResolver func(name string) (EngineLocality, error)
@@ -33,9 +42,9 @@ func (r *engineLocalityResolver) Resolve(name string) (EngineLocality, error) {
 	defer r.mu.Unlock()
 
 	switch name {
-	case "target":
+	case LocalityTarget:
 		return r.target, nil
-	case "host":
+	case LocalityHost:
 		if r.host != nil {
 			return *r.host, nil
 		}

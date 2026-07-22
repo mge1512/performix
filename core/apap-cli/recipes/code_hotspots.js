@@ -88,6 +88,17 @@ var recipe = {
         defaultValue: false,
       },
     },
+    {
+      id: 'reformat_on_host',
+      required: false,
+      label: 'Reformat on host',
+      description:
+        'Run analysis on the host instead of the target. This is always enabled for Android targets but can be optionally enabled for Linux targets. collect_java_stacks and collect_dotnet_stacks are not currently supported when reformat_on_host is enabled.',
+      config: {
+        type: 'checkbox',
+        defaultValue: false,
+      },
+    },
   ],
   renderParameters: [
     {
@@ -208,6 +219,9 @@ function buildNeoprofParams(context, samplingFreq) {
     sampling_frequency: samplingFreq,
     collect_java_stacks: context.getParameter('collect_java_stacks'),
     collect_dotnet_stacks: context.getParameter('collect_dotnet_stacks'),
+    reformat_on_host:
+      isAndroidTarget(context.targetInfo()) ||
+      context.getParameter('reformat_on_host'),
   };
 }
 
@@ -231,6 +245,16 @@ function buildWperfParams(samplingFreq) {
 function isWindowsTarget(targetInfo) {
   const family = targetInfo?.Os?.OSFamily ?? '';
   return family.toLowerCase() === 'windows';
+}
+
+/**
+ * Determine whether the current target OS is Android.
+ * @param {import("./docs/jsdocs").TargetInfoDescription} targetInfo
+ * @returns {boolean}
+ */
+function isAndroidTarget(targetInfo) {
+  const family = targetInfo?.Os?.OSFamily ?? '';
+  return family.toLowerCase() === 'android';
 }
 
 /**

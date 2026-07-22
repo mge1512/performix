@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Arm-Debug/apap-cli/apap-engine/message/messageutil"
 	"github.com/Arm-Debug/apap-cli/apap-engine/terminology"
-	"github.com/Arm-Debug/apap-cli/apap-engine/util"
 )
 
 // To add a new catalog for a new locale:
@@ -191,7 +191,7 @@ func flattenCatalog(prefix string, node any, out map[MessageCode]CatalogMessage)
 	switch typed := node.(type) {
 	case map[string]any:
 		for k, v := range typed {
-			if util.IsCatalogMetadataKey(k) {
+			if messageutil.IsCatalogMetadataKey(k) {
 				continue
 			}
 			key := k
@@ -214,6 +214,11 @@ func flattenCatalog(prefix string, node any, out map[MessageCode]CatalogMessage)
 			}
 		}
 	}
+}
+
+// IsCatalogMetadataKey reports whether a catalog key is metadata rather than a message namespace.
+func IsCatalogMetadataKey(key string) bool {
+	return messageutil.IsCatalogMetadataKey(key)
 }
 
 func asString(v any) string {

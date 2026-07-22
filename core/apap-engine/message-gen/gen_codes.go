@@ -23,8 +23,8 @@ import (
 	"strings"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/licenseheader"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message/messageutil"
 	"github.com/Arm-Debug/apap-cli/apap-engine/perms"
-	"github.com/Arm-Debug/apap-cli/apap-engine/util"
 )
 
 // Relative path to the catalog.json file
@@ -34,7 +34,7 @@ const outputPath = "../message/codes.go"
 // flatten walks nested maps and collects all fully qualified keys like engine.recipe.run.SOME_ERROR
 func flatten(prefix string, m map[string]any, out *[]string) {
 	for k, v := range m {
-		if util.IsCatalogMetadataKey(k) {
+		if messageutil.IsCatalogMetadataKey(k) {
 			continue
 		}
 		key := k

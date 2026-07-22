@@ -300,7 +300,7 @@ func TestRecipeParsing(t *testing.T) {
 
 		mockRecipeAPI.On("getParameter", mock.Anything).Return(goja.Undefined())
 		parser := RecipeParserJS{APIFactory: apiFactory}
-		recipeProp, err := parser.ParseRecipe(globalRecipeJs)
+		recipeProp, err := ParseInlineRecipe(&parser, globalRecipeJs)
 		require.NoError(t, err)
 		assert.Equal(t, recipeProp.Name, "cpu_microarchitecture")
 		assert.Equal(t, recipeProp.Title, "CPU Microarchitecture")
@@ -386,7 +386,7 @@ func TestRecipeParsing(t *testing.T) {
 
 	t.Run("Recipe status defaults to preview when omitted", func(t *testing.T) {
 		parser := RecipeParserJS{}
-		recipeProp, err := parser.ParseRecipe(`
+		recipeProp, err := ParseInlineRecipe(&parser, `
 const recipe = {
 	name: "preview_recipe",
 	title: "Preview Recipe",
@@ -405,7 +405,7 @@ const recipe = {
 
 	t.Run("Recipe can use engine version metadata in deployments", func(t *testing.T) {
 		parser := RecipeParserJS{}
-		recipeProp, err := parser.ParseRecipe(`
+		recipeProp, err := ParseInlineRecipe(&parser, `
 const toolVersion = performix.engineVersion;
 const recipe = {
 	name: "system_utilization",
@@ -482,7 +482,7 @@ const recipe = {
 		mockRecipeAPI.On("getParameter", mock.Anything).Run(func(mock.Arguments) {
 			panic(mockRecipeAPI.vm.ToValue("exception raised in getParameter"))
 		})
-		recipeProp, err := parser.ParseRecipe(globalRecipeJs)
+		recipeProp, err := ParseInlineRecipe(&parser, globalRecipeJs)
 		assert.NoError(t, err)
 		assert.Equal(t, recipeProp.Name, "cpu_microarchitecture")
 		assert.Equal(t, recipeProp.Parameters.MultiSelect[0].ID, "metrics_group")
@@ -507,7 +507,7 @@ const recipe = {
 			description: "Presents the micro-architecture analysis using cpu_microarchitecture methodology"
 		}`
 		parser := RecipeParserJS{}
-		_, err := parser.ParseRecipe(recipeJs)
+		_, err := ParseInlineRecipe(&parser, recipeJs)
 		assert.ErrorContains(t, err, "SyntaxError")
 	})
 	t.Run("Recipe parsing fails when recipe definition is not found", func(t *testing.T) {
@@ -516,21 +516,21 @@ const recipe = {
 			description: "Presents the micro-architecture analysis using cpu_microarchitecture methodology",
 		}`
 		parser := RecipeParserJS{}
-		_, err := parser.ParseRecipe(recipeJs)
+		_, err := ParseInlineRecipe(&parser, recipeJs)
 		assert.EqualError(t, err, "recipe not defined")
 	})
 
 	t.Run("Recipe parsing fails when recipe type mismatches", func(t *testing.T) {
 		recipeJs := `const recipe = "something"`
 		parser := RecipeParserJS{}
-		_, err := parser.ParseRecipe(recipeJs)
+		_, err := ParseInlineRecipe(&parser, recipeJs)
 		assert.ErrorContains(t, err, "expected a map, got 'string'")
 	})
 
 	t.Run("Recipe parsing fails when API function is called outside of the run stages", func(t *testing.T) {
 		recipeJs := `apap.getParameter("metrics_group")`
 		parser := RecipeParserJS{}
-		_, err := parser.ParseRecipe(recipeJs)
+		_, err := ParseInlineRecipe(&parser, recipeJs)
 		assert.ErrorContains(t, err, "apap is not defined")
 	})
 	t.Run("Recipe parsing fails when recipe definition misses required field Title", func(t *testing.T) {
@@ -587,7 +587,7 @@ const recipe = {
 			return mockRecipeAPI
 		}
 		parser := RecipeParserJS{APIFactory: apiFactory}
-		_, err := parser.ParseRecipe(recipeJs)
+		_, err := ParseInlineRecipe(&parser, recipeJs)
 		assert.ErrorContains(t, err, "has unset fields: Title")
 	})
 
@@ -633,7 +633,7 @@ const recipe = {
 		parser := RecipeParserJS{APIFactory: apiFactory}
 		testCases := []string{recipeJsP1 + recipeJsP2, recipeJsP1 + "options: []," + recipeJsP2}
 		for _, testCase := range testCases {
-			_, err := parser.ParseRecipe(testCase)
+			_, err := ParseInlineRecipe(&parser, testCase)
 			expectedMetadata := map[string]string{
 				"paramName": "paramWiOption",
 				"source":    "cpu_microarchitecture",
@@ -763,7 +763,7 @@ func TestRenderStages(t *testing.T) {
 		stageContext := &recipe.StageContext{RendererNotifier: renderNotifier}
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalRecipeJs)
+		recipeProp, err := ParseInlineRecipe(&parser, globalRecipeJs)
 		assert.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RenderStages[0]}
@@ -792,7 +792,7 @@ func TestRenderStages(t *testing.T) {
 		stageContext := &recipe.StageContext{RendererNotifier: renderNotifier}
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		require.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RenderStages[0]}
@@ -829,7 +829,7 @@ func TestRenderStages(t *testing.T) {
 		stageContext := &recipe.StageContext{RendererNotifier: renderNotifier}
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		require.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RenderStages[0]}
@@ -856,7 +856,7 @@ func TestRenderStages(t *testing.T) {
 		stageContext := &recipe.StageContext{RendererNotifier: renderNotifier}
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		require.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RenderStages[0]}
@@ -895,7 +895,7 @@ func TestRenderStages(t *testing.T) {
 		stageContext := &recipe.StageContext{RendererNotifier: renderNotifier}
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		require.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RenderStages[0]}
@@ -928,7 +928,7 @@ func TestRenderStages(t *testing.T) {
 		stageContext := &recipe.StageContext{RendererNotifier: renderNotifier}
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		require.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RenderStages[0]}
@@ -966,7 +966,7 @@ func TestRenderStages(t *testing.T) {
 			}`
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		require.NoError(t, err)
 
 		runDir := t.TempDir()
@@ -1036,7 +1036,7 @@ func TestRenderStages(t *testing.T) {
 			}`
 
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		require.NoError(t, err)
 
 		runDir := t.TempDir()
@@ -1099,7 +1099,7 @@ func TestRenderStages(t *testing.T) {
 				return renderSpec
 			}`
 		parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + globalRun + renderStageJS)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+globalRun+renderStageJS)
 		assert.NoError(t, err)
 
 		tests := []struct {
@@ -1279,7 +1279,7 @@ func TestParameterOptionsStage(t *testing.T) {
 			renderStages: [{name: "",	description: "", exec: (a) => {}}],
 		};
 		`
-		recipeProp, err := parser.ParseRecipe(recipesRC)
+		recipeProp, err := ParseInlineRecipe(&parser, recipesRC)
 		require.NoError(t, err)
 
 		assert.Equal(t, parameters.SingleSelectParameter{
@@ -1332,7 +1332,7 @@ func TestParameterOptionsStage(t *testing.T) {
 			renderStages: [{name: "",	description: "", exec: (a) => {}}],
 		};
 		`
-		recipeProp, err := parser.ParseRecipe(recipesRC)
+		recipeProp, err := ParseInlineRecipe(&parser, recipesRC)
 		require.NoError(t, err)
 
 		assert.Equal(t, parameters.MultiSelectParameter{
@@ -1385,7 +1385,7 @@ func TestParameterOptionsStage(t *testing.T) {
 			renderStages: [{name: "",	description: "", exec: (a) => {}}],
 		};
 		`
-		recipeProp, err := parser.ParseRecipe(recipesRC)
+		recipeProp, err := ParseInlineRecipe(&parser, recipesRC)
 		require.NoError(t, err)
 
 		require.Len(t, recipeProp.ParameterOptionsStages, 1)
@@ -1429,7 +1429,7 @@ func TestParameterOptionsStage(t *testing.T) {
 			renderStages: [{name: "",	description: "", exec: (a) => {}}],
 		};
 		`
-		recipeProp, err := parser.ParseRecipe(recipesRC)
+		recipeProp, err := ParseInlineRecipe(&parser, recipesRC)
 		require.NoError(t, err)
 
 		require.Len(t, recipeProp.ParameterOptionsStages, 1)
@@ -1473,7 +1473,7 @@ func TestParameterOptionsStage(t *testing.T) {
 			renderStages: [{name: "",	description: "", exec: (a) => {}}],
 		};
 		`
-		recipeProp, err := parser.ParseRecipe(recipesRC)
+		recipeProp, err := ParseInlineRecipe(&parser, recipesRC)
 		require.NoError(t, err)
 
 		require.Len(t, recipeProp.ParameterOptionsStages, 1)
@@ -1512,7 +1512,7 @@ func TestParameterOptionsStage(t *testing.T) {
 			renderStages: [{name: "",	description: "", exec: (a) => {}}],
 		};
 		`
-		recipeProp, err := parser.ParseRecipe(recipesRC)
+		recipeProp, err := ParseInlineRecipe(&parser, recipesRC)
 		require.NoError(t, err)
 
 		require.Len(t, recipeProp.ParameterOptionsStages, 1)
@@ -1571,7 +1571,7 @@ const recipe = {
 			};
 		}
 		`
-		recipeProp, err := parser.ParseRecipe(enabledParamFunc + parameterValidationRecipe)
+		recipeProp, err := ParseInlineRecipe(&parser, enabledParamFunc+parameterValidationRecipe)
 		require.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{ScriptedStage: recipeProp.ParameterValidationStage}
@@ -1593,7 +1593,7 @@ const recipe = {
 			};
 		}
 		`
-		recipeProp, err := parser.ParseRecipe(enabledParamFunc + parameterValidationRecipe)
+		recipeProp, err := ParseInlineRecipe(&parser, enabledParamFunc+parameterValidationRecipe)
 		require.NoError(t, err)
 
 		sc := &recipe.StageContext{}
@@ -1625,7 +1625,7 @@ const recipe = {
 			};
 		}
 		`
-		recipeProp, err := parser.ParseRecipe(enabledParamFunc + parameterValidationRecipe)
+		recipeProp, err := ParseInlineRecipe(&parser, enabledParamFunc+parameterValidationRecipe)
 		require.NoError(t, err)
 
 		sc := &recipe.StageContext{ParameterOptions: recipe.ParameterOptions{SingleSelectOptions: make([][]parameters.ParameterOption, 1), RadioOptions: make([][]parameters.ParameterOption, 1)}}
@@ -1660,7 +1660,7 @@ const recipe = {
 			};
 		}
 		`
-		recipeProp, err := parser.ParseRecipe(enabledParamFunc + parameterValidationRecipe)
+		recipeProp, err := ParseInlineRecipe(&parser, enabledParamFunc+parameterValidationRecipe)
 		require.NoError(t, err)
 
 		sc := &recipe.StageContext{}
@@ -1689,7 +1689,7 @@ const recipe = {
 			};
 		}
 		`
-		recipeProp, err := parser.ParseRecipe(enabledParamFunc + parameterValidationRecipe)
+		recipeProp, err := ParseInlineRecipe(&parser, enabledParamFunc+parameterValidationRecipe)
 		require.NoError(t, err)
 
 		sc := &recipe.StageContext{}
@@ -1739,7 +1739,7 @@ func TestJSErrors(t *testing.T) {
 				throw "Something bad happened."
 			}`
 
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + runStage + globalRender)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+runStage+globalRender)
 		require.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RunStages[0]}
@@ -1761,7 +1761,7 @@ func TestJSErrors(t *testing.T) {
 				throw { code: "common.UNSUPPORTED_TARGET_TYPE", cause: "My error cause", metadata: {info: "hello world"} }
 			}`
 
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + runStage + globalRender)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+runStage+globalRender)
 		assert.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RunStages[0]}
@@ -1787,7 +1787,7 @@ func TestJSErrors(t *testing.T) {
 				throw { code: "common.UNSUPPORTED_TARGET_TYPE", metadata: {info: "hello world"} }
 			}`
 
-		recipeProp, err := parser.ParseRecipe(globalEnabledParams + globalRecipeProperties + globalReady + runStage + globalRender)
+		recipeProp, err := ParseInlineRecipe(&parser, globalEnabledParams+globalRecipeProperties+globalReady+runStage+globalRender)
 		assert.NoError(t, err)
 
 		recipeStage := &stages.CustomRecipeStage{StageName: recipeProp.RenderStages[0].Name(), ScriptedStage: recipeProp.RunStages[0]}
@@ -1911,7 +1911,126 @@ func TestLoadSystemUtilizationRecipeUsesIntegrationVersion(t *testing.T) {
 	require.NoError(t, err)
 
 	parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
-	recipeProp, err := parser.ParseRecipe(string(data))
+	recipeProp, err := parser.ParseRecipe(recipePath, string(data))
 	require.NoError(t, err)
 	assert.Equal(t, "1.0.0", recipeProp.ToolVersions["sysutil-timeline"])
+}
+
+func TestParseRecipeSupportsRelativeHelperRequire(t *testing.T) {
+	recipeDir := t.TempDir()
+	helperPath := filepath.Join(recipeDir, "helper.js")
+	recipePath := filepath.Join(recipeDir, "recipe.js")
+
+	err := os.WriteFile(helperPath, []byte(`
+module.exports = {
+	name: "from_helper",
+	title: "From helper"
+};
+`), 0o600)
+	require.NoError(t, err)
+
+	recipeSource := `
+const helper = require("./helper");
+
+function readyStage(apap) {}
+function runStage(apap) {}
+function renderStage(apap) {
+	return {renderers: [], ui: {visualizations: []}};
+}
+
+const recipe = {
+	name: helper.name,
+	title: helper.title,
+	description: "test recipe",
+	version: "1.0",
+	api_version: "1.0.0",
+	parameters: [],
+	readyStages: [{name: "ready", description: "", exec: readyStage}],
+	runStages: [{name: "run", description: "", exec: runStage}],
+	renderStages: [{name: "render", description: "", exec: renderStage}]
+};
+`
+	err = os.WriteFile(recipePath, []byte(recipeSource), 0o600)
+	require.NoError(t, err)
+
+	parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
+	parsed, err := parser.ParseRecipe(recipePath, recipeSource)
+	require.NoError(t, err)
+	assert.Equal(t, "from_helper", parsed.Name)
+	assert.Equal(t, "From helper", parsed.Title)
+}
+
+func TestParseRecipeSupportsRelativeHelperRequireViaSymlink(t *testing.T) {
+	baseDir := t.TempDir()
+	realDir := filepath.Join(baseDir, "real")
+	linkDir := filepath.Join(baseDir, "links")
+	require.NoError(t, os.Mkdir(realDir, 0o700))
+	require.NoError(t, os.Mkdir(linkDir, 0o700))
+
+	helperPath := filepath.Join(realDir, "helper.js")
+	recipePath := filepath.Join(realDir, "recipe.js")
+	recipeLinkPath := filepath.Join(linkDir, "recipe.js")
+
+	err := os.WriteFile(helperPath, []byte(`
+module.exports = {
+	name: "from_symlink_helper",
+	title: "From symlink helper"
+};
+`), 0o600)
+	require.NoError(t, err)
+
+	recipeSource := `
+const helper = require("./helper");
+
+function readyStage(apap) {}
+function runStage(apap) {}
+function renderStage(apap) {
+	return {renderers: [], ui: {visualizations: []}};
+}
+
+const recipe = {
+	name: helper.name,
+	title: helper.title,
+	description: "test recipe",
+	version: "1.0",
+	api_version: "1.0.0",
+	parameters: [],
+	readyStages: [{name: "ready", description: "", exec: readyStage}],
+	runStages: [{name: "run", description: "", exec: runStage}],
+	renderStages: [{name: "render", description: "", exec: renderStage}]
+};
+`
+	require.NoError(t, os.WriteFile(recipePath, []byte(recipeSource), 0o600))
+	require.NoError(t, os.Symlink(recipePath, recipeLinkPath))
+
+	parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
+	parsed, err := parser.ParseRecipe(recipeLinkPath, recipeSource)
+	require.NoError(t, err)
+	assert.Equal(t, "from_symlink_helper", parsed.Name)
+	assert.Equal(t, "From symlink helper", parsed.Title)
+}
+
+func TestParseRecipeInlineStillWorks(t *testing.T) {
+	parser := RecipeParserJS{APIFactory: CreateConcreteAPI}
+	parsed, err := ParseInlineRecipe(&parser, `
+function readyStage(apap) {}
+function runStage(apap) {}
+function renderStage(apap) {
+	return {renderers: [], ui: {visualizations: []}};
+}
+
+const recipe = {
+	name: "inline",
+	title: "Inline recipe",
+	description: "inline parsing test",
+	version: "1.0",
+	api_version: "1.0.0",
+	parameters: [],
+	readyStages: [{name: "ready", description: "", exec: readyStage}],
+	runStages: [{name: "run", description: "", exec: runStage}],
+	renderStages: [{name: "render", description: "", exec: renderStage}]
+};
+`)
+	require.NoError(t, err)
+	assert.Equal(t, "inline", parsed.Name)
 }

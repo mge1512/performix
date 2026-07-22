@@ -66,20 +66,6 @@ const ASCT_BENCHMARKS = [
 ];
 
 /**
- * ASCT 0.6.0 declares its output as a wildcard, so discovered files do not
- * retain the manifest component type. Keep the current filename convention in
- * one place until ASCT publishes sectioned data files.
- *
- * @param {{fileName: string}} component
- */
-function isCurrentASCTUbenchDataComponent(component) {
-  return (
-    component.fileName.endsWith('.ubench.json') &&
-    !component.fileName.endsWith('-summary.ubench.json')
-  );
-}
-
-/**
  * @type {import("./docs/jsdocs").Recipe}
  */
 var recipe = {
@@ -370,124 +356,214 @@ function runAsct(context) {
   context.runTools(tools);
 }
 
+/**
+ * Convert ASCT's current column-oriented ubench JSON shape into primitive rows
+ * that generic table visualizations and later chart queries can control.
+ * @param {string} relativePath
+ */
+function buildASCTJSONTableSQL(relativePath) {
+  return `
+    WITH source AS (
+      SELECT row_to_json(raw_row) AS document
+      FROM read_json_auto({{path:${relativePath}}}) AS raw_row
+    ),
+    metrics AS (
+      SELECT
+        metric.key AS metric,
+        metric.value AS rows_by_key
+      FROM source
+      CROSS JOIN json_each(document) AS metric
+      WHERE json_type(metric.value) = 'OBJECT'
+    ),
+    metric_values_by_key AS (
+      SELECT
+        value_by_key.key AS row_key,
+        metric,
+        value_by_key.value AS raw_value,
+        json_type(value_by_key.value) AS value_type
+      FROM metrics
+      CROSS JOIN json_each(rows_by_key) AS value_by_key
+    )
+    SELECT
+      row_key,
+      metric,
+      CASE
+        WHEN value_type = 'VARCHAR' THEN json_extract_string(raw_value, '$')
+        ELSE raw_value::VARCHAR
+      END AS value,
+      value_type
+    FROM metric_values_by_key
+    ORDER BY try_cast(row_key AS INTEGER), row_key, metric
+  `;
+}
+
 const ASCT_C2C_LATENCY_RENDERER_ID = 'asct_csv_benchmark_c2c_latency';
 
-const ASCT_C2C_LATENCY_DATA_SOURCE = [
-  { renderer_id: ASCT_C2C_LATENCY_RENDERER_ID, output: 'csv' },
+/**
+ * @param {string} rendererId
+ * @param {string} output
+ */
+function makeRendererDataSource(rendererId, output) {
+  return [{ renderer_id: rendererId, output }];
+}
+
+const ASCT_C2C_LATENCY_DATA_SOURCE = makeRendererDataSource(
+  ASCT_C2C_LATENCY_RENDERER_ID,
+  'csv',
+);
+
+const ASCT_CSV_ANALYSIS_VISUALIZATIONS = [
+  {
+    key: 'coreToCoreLatencyHeatmap',
+    benchmarkName: 'c2c-latency',
+    config: {
+      xColumn: 'source_core',
+      yColumn: 'target_core',
+      valueColumn: 'latency_ns',
+      xLabel: 'Source core',
+      yLabel: 'Target core',
+      valueLabel: 'Latency',
+      valueUnit: 'ns',
+      data_source: {
+        tables: {
+          table: ASCT_C2C_LATENCY_DATA_SOURCE,
+        },
+      },
+      customQuery: {
+        tableNamePlaceholder: '{table}',
+        query:
+          'SELECT ' +
+          'try_cast("CPUA" AS VARCHAR) AS "source_core", ' +
+          'try_cast("CPUB" AS VARCHAR) AS "target_core", ' +
+          'try_cast("Latency" AS DOUBLE) AS "latency_ns" ' +
+          'FROM {table} ' +
+          'WHERE "CPUA" IS NOT NULL AND "CPUB" IS NOT NULL AND "Latency" IS NOT NULL ' +
+          'ORDER BY try_cast("CPUA" AS INTEGER), try_cast("CPUB" AS INTEGER)',
+      },
+    },
+  },
 ];
 
-const ASCT_CORE_TO_CORE_LATENCY_HEATMAP_CONFIG = {
-  xColumn: 'source_core',
-  yColumn: 'target_core',
-  valueColumn: 'latency_ns',
-  xLabel: 'Source core',
-  yLabel: 'Target core',
-  valueLabel: 'Latency',
-  valueUnit: 'ns',
-  data_source: {
-    tables: {
-      table: ASCT_C2C_LATENCY_DATA_SOURCE,
+const ASCT_JSON_ANALYSIS_VISUALIZATIONS = [
+  {
+    key: 'latencySweepLineChart',
+    benchmarkName: 'latency-sweep',
+    fileName: 'latency-sweep.ubench.json',
+    config: {
+      xAxisTitle: 'Message size (bytes)',
+      yAxisTitle: 'Latency (ns)',
+      enableZoom: false,
+      series: [
+        {
+          type: 'single',
+          name: 'Average latency',
+          xColumn: 'size_bytes',
+          yColumn: 'average_latency_ns',
+        },
+      ],
+      customQuery: {
+        tableNamePlaceholder: '__table__',
+        query: `
+          WITH chart_values AS (
+            SELECT
+              row_key,
+              max(
+                CASE WHEN metric = 'sizes' THEN try_cast(value AS DOUBLE) END
+              ) AS size_bytes,
+              max(
+                CASE
+                  WHEN metric = 'average_latency_ns'
+                  THEN try_cast(value AS DOUBLE)
+                END
+              ) AS average_latency_ns
+            FROM __table__
+            WHERE metric IN ('sizes', 'average_latency_ns')
+            GROUP BY row_key
+          )
+          SELECT size_bytes, average_latency_ns
+          FROM chart_values
+          WHERE size_bytes IS NOT NULL
+            AND average_latency_ns IS NOT NULL
+          ORDER BY size_bytes
+        `,
+      },
     },
   },
-  customQuery: {
-    tableNamePlaceholder: '{table}',
-    query:
-      'SELECT ' +
-      'try_cast("CPUA" AS VARCHAR) AS "source_core", ' +
-      'try_cast("CPUB" AS VARCHAR) AS "target_core", ' +
-      'try_cast("Latency" AS DOUBLE) AS "latency_ns" ' +
-      'FROM {table} ' +
-      'WHERE "CPUA" IS NOT NULL AND "CPUB" IS NOT NULL AND "Latency" IS NOT NULL ' +
-      'ORDER BY try_cast("CPUA" AS INTEGER), try_cast("CPUB" AS INTEGER)',
-  },
-};
-
-const ASCT_CORE_TO_CORE_LATENCY_ANALYSIS_CONFIG = {
-  data_source: {
-    tables: {
-      coreToCoreLatencyHeatmap: ASCT_C2C_LATENCY_DATA_SOURCE,
-    },
-  },
-  coreToCoreLatencyHeatmap: ASCT_CORE_TO_CORE_LATENCY_HEATMAP_CONFIG,
-};
+];
 
 /**
- * @param {import("./docs/jsdocs").RenderExecutionContext} context
+ * @param {Record<string, any>} analysisConfig
+ * @param {string} key
+ * @param {any} visualizationConfig
+ * @param {{renderer_id: string, output: string}[]} dataSource
  */
-function renderAsct(context) {
-  const renderers = /** @type {any[]} */ ([]);
-  const visualizations = [];
+function addAsctAnalysisVisualization(
+  analysisConfig,
+  key,
+  visualizationConfig,
+  dataSource,
+) {
+  analysisConfig.data_source = analysisConfig.data_source || { tables: {} };
+  analysisConfig.data_source.tables[key] = dataSource;
+  analysisConfig[key] = {
+    ...visualizationConfig,
+    data_source: {
+      tables: {
+        table: dataSource,
+      },
+    },
+  };
+}
 
-  const entity = 'tool/asct/0/output';
-  const csvFileDiscovery = getCreatedCsvFiles(context, entity);
-  const createdCsvFiles = csvFileDiscovery.files;
-  // Use the generated CSV, not the pre-run config, as the source of truth.
-  const hasC2cLatencyCsv = createdCsvFiles.has('c2c-latency.csv');
+/**
+ * @param {{entity: string, selectedBenchmarks: { id: string, name: string, label: string, defaultSelected: boolean, description: string }[]}} args
+ */
+function buildAsctAnalysisConfig({ entity, selectedBenchmarks }) {
+  const analysisConfig = /** @type {Record<string, any>} */ ({
+    data_source: { tables: {} },
+  });
+  let renderersToAdd = /** @type {any[]} */ ([]);
 
-  const addCsvRenderer = (rendererId, file) => {
-    renderers.push({
+  // Change this to a map with the selected benchmark as the value
+  const selectedBenchmarkNames = new Map(
+    selectedBenchmarks.map((benchmark) => [benchmark.name, benchmark]),
+  );
+
+  ASCT_CSV_ANALYSIS_VISUALIZATIONS.forEach((v) => {
+    const selectedBenchmark = selectedBenchmarkNames.get(v.benchmarkName);
+    if (selectedBenchmark === undefined) {
+      return;
+    }
+
+    const rendererId = `asct_csv_${selectedBenchmark.id}`;
+    renderersToAdd.push({
       type: 'CSV',
       id: rendererId,
       config: {
-        component: `${entity}/${file}`,
+        component: `${entity}/${`${selectedBenchmark.name}.csv`}`,
       },
     });
-  };
 
-  const openDirectoryRendererId = 'asct_open_directory_renderer';
-  renderers.push({
-    type: 'DummyRenderer',
-    id: openDirectoryRendererId,
-    config: {
-      schema: [],
-      content: [],
-    },
-  });
-  visualizations.push({
-    type: 'asct_analysis',
-    rendererId: openDirectoryRendererId,
-    id: 'asct_analysis',
-    title: 'Analysis',
-    description: '',
-    config: hasC2cLatencyCsv ? ASCT_CORE_TO_CORE_LATENCY_ANALYSIS_CONFIG : {},
+    addAsctAnalysisVisualization(
+      analysisConfig,
+      v.key,
+      v.config,
+      makeRendererDataSource(rendererId, 'csv'),
+    );
   });
 
-  visualizations.push(
-    /** @type {any} */ ({
-      type: 'open_directory',
-      rendererId: openDirectoryRendererId,
-      id: 'asct_open_directory',
-      title: 'Summary',
-      description: '',
-      config: {
-        tool_name: TOOL_ASCT_NAME,
-        title: 'System Characterization report generated',
-        description: getSummaryDescription(csvFileDiscovery),
-        caption:
-          'Opens the folder on your machine containing the ASCT output files for this run.',
-      },
-    }),
-  );
+  ASCT_JSON_ANALYSIS_VISUALIZATIONS.forEach((v) => {
+    const selectedBenchmark = selectedBenchmarkNames.get(v.benchmarkName);
+    if (selectedBenchmark === undefined) {
+      return;
+    }
+    const rendererId = `asct_json_${selectedBenchmark.id}`;
 
-  // Expose each current-format ubench independently and let DuckDB infer its
-  // root JSON fields. Later visualizations can reshape the nested row-key
-  // objects for their particular charts without hard-coding them here.
-  // Update this selection when ASCT adopts sectioned raw/<report>/data.json
-  // output.
-  const ubenchComponents = context
-    .listRunComponents(0, entity)
-    .filter(isCurrentASCTUbenchDataComponent);
-  const ubenchRenderers = ubenchComponents.map((component, index) => {
-    const rendererId = `asct_ubench_preview_${index}`;
-
-    renderers.push({
+    renderersToAdd.push({
       type: 'SQL',
       id: rendererId,
       config: {
-        sql: `
-          SELECT *
-          FROM read_json_auto({{path:${component.relativePath}}})
-        `,
+        sql: buildASCTJSONTableSQL(`${entity}/${v.fileName}`),
         output: {
           name: 'table',
           cardinality: 'one',
@@ -499,133 +575,58 @@ function renderAsct(context) {
       },
     });
 
-    return { component, rendererId };
+    addAsctAnalysisVisualization(
+      analysisConfig,
+      v.key,
+      v.config,
+      makeRendererDataSource(rendererId, 'table'),
+    );
   });
 
-  ubenchRenderers.forEach(({ component, rendererId }) => {
-    visualizations.push({
-      type: 'generic_grid',
-      id: rendererId,
-      rendererId,
-      title: component.fileName,
-      description: '',
-      config: {
-        autoSizeColumns: true,
-        // Generic grids accept primitive cell values only. Preserve the
-        // one-row, column-oriented shape while making each nested value safe
-        // to display as JSON text.
-        customQuery: {
-          query: 'SELECT to_json(COLUMNS(*))::VARCHAR FROM __table__',
-          tableNamePlaceholder: '__table__',
-        },
-        data_source: {
-          tables: {
-            table: [{ renderer_id: rendererId, output: 'table' }],
-          },
-        },
-      },
-    });
-  });
+  return { analysisConfig, renderersToAdd };
+}
 
-  // CSVs with tabular benchmark data rendered as generic grids.
-  const dataCsvFiles = new Set([
-    'idle-latency.csv',
-    'peak-bandwidth.csv',
-    'cross-numa-bandwidth.csv',
-    'latency-sweep.csv',
-    'bandwidth-sweep.csv',
-    'loaded-latency.csv',
-    'c2c-latency.csv',
-  ]);
+/**
+ * @param {import("./docs/jsdocs").RenderExecutionContext} context
+ */
+function renderAsct(context) {
+  const runDescriptions = context.getRunDescriptions();
+  const renderers = /** @type {any[]} */ ([]);
+  const visualizations = [];
 
-  const entries = ASCT_BENCHMARKS.map((benchmark) => ({
-    id: benchmark.id,
-    title: benchmark.label,
-    description: benchmark.description,
-    file: `${benchmark.name}.csv`,
-  })).filter(
-    (entry) => dataCsvFiles.has(entry.file) && createdCsvFiles.has(entry.file),
-  );
+  const entity = 'tool/asct/0/output';
 
-  for (const entry of entries) {
-    const rendererId = `asct_csv_${entry.id}`;
-    addCsvRenderer(rendererId, entry.file);
+  const params =
+    runDescriptions.length > 0 ? runDescriptions[0].Parameters : {};
 
-    visualizations.push({
-      type: 'generic_grid',
-      id: `asct_${entry.id}_table`,
-      rendererId: rendererId,
-      title: entry.title,
-      description: entry.description,
-      config: {
-        autoSizeColumns: true,
-        data_source: {
-          tables: {
-            table: [{ renderer_id: rendererId, output: 'csv' }],
-          },
-        },
-        customQuery: {
-          tableNamePlaceholder: '__table__',
-          query:
-            "SELECT COLUMNS(c -> c = 'index' OR c = 'column0' OR c = '') AS \"-\", " +
-            "COLUMNS(c -> c != 'index' AND c != 'column0' AND c != '') FROM __table__",
-        },
-      },
-    });
-  }
+  // Apply the shared selection rules so rendering matches run/ready behavior.
+  const { selectedBenchmarks } = resolveBenchmarkSelection((id) => params[id]);
 
-  // CSVs with key-value style content rendered as generic grids.
-  const keyValueCsvFiles = new Set(['system-info.csv']);
-
-  const keyValueEntries = [
-    {
-      id: 'system_info',
-      title: 'System Information',
-      description:
-        'System information collected by ASCT, including CPU, memory, and storage details.',
-      file: 'system-info.csv',
+  const openDirectoryRendererId = 'asct_open_directory_renderer';
+  renderers.push({
+    type: 'DummyRenderer',
+    id: openDirectoryRendererId,
+    config: {
+      schema: [],
+      content: [],
     },
-    ...ASCT_BENCHMARKS.map((benchmark) => ({
-      id: benchmark.id,
-      title: benchmark.label,
-      description: benchmark.description,
-      file: `${benchmark.name}.csv`,
-    })),
-  ].filter(
-    (entry) =>
-      keyValueCsvFiles.has(entry.file) && createdCsvFiles.has(entry.file),
-  );
+  });
 
-  for (const entry of keyValueEntries) {
-    const rendererId = `asct_key_value_${entry.id}`;
+  const asctAnalysisConfig = buildAsctAnalysisConfig({
+    entity,
+    selectedBenchmarks,
+  });
 
-    addCsvRenderer(rendererId, entry.file);
+  renderers.push(...asctAnalysisConfig.renderersToAdd);
 
-    visualizations.push({
-      type: 'generic_grid',
-      id: `asct_${entry.id}_table`,
-      rendererId: rendererId,
-      title: entry.title,
-      description: entry.description,
-      config: {
-        autoSizeColumns: true,
-        data_source: {
-          tables: {
-            table: [{ renderer_id: rendererId, output: 'csv' }],
-          },
-        },
-        customQuery: {
-          tableNamePlaceholder: '__table__',
-          query:
-            'SELECT * FROM (' +
-            'SELECT \'\' AS "Name", \'\' AS "Value" WHERE FALSE ' +
-            'UNION ALL ' +
-            'SELECT * FROM __table__' +
-            ') t',
-        },
-      },
-    });
-  }
+  visualizations.push({
+    type: 'asct_analysis',
+    rendererId: openDirectoryRendererId,
+    id: 'asct_analysis',
+    title: 'Analysis',
+    description: '',
+    config: asctAnalysisConfig.analysisConfig,
+  });
 
   return { renderers, visualizations };
 }

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/Arm-Debug/apap-cli/apap-engine/util"
 )
 
 var PlaceholderCharsRegex = `[a-zA-Z0-9]`
@@ -28,7 +26,7 @@ func ValidateMetadataPlaceholders(err error) error {
 	if len(unsetPlaceholders) == 0 {
 		return nil
 	}
-	unsetString := strings.Join(util.CopyKeysSlice(unsetPlaceholders), ", ")
+	unsetString := strings.Join(copyKeysSlice(unsetPlaceholders), ", ")
 	return fmt.Errorf("message '%v' has the following unset placeholders: %v", msg.Code, unsetString)
 }
 
@@ -46,4 +44,12 @@ func collectUnsetPlaceholders(msg *CatalogMessage) map[string]struct{} {
 		}
 	}
 	return unsetPlaceholders
+}
+
+func copyKeysSlice[K comparable, V any](m map[K]V) []K {
+	cpy := make([]K, 0, len(m))
+	for k := range m {
+		cpy = append(cpy, k)
+	}
+	return cpy
 }

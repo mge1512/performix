@@ -76,6 +76,16 @@ let tool = {
         },
         {
           type: 'tool_bundle',
+          name: slAnalyzeToolName,
+          version: `${bundleVersion}-${rc}`,
+          requiredWhen: {
+            type: 'param_is_set',
+            parameters: [{ reformat_on_host: true }],
+          },
+          locality: 'host',
+        },
+        {
+          type: 'tool_bundle',
           name: jitdumpJvmToolName,
           version: jitdumpJvmVersion,
           requiredWhen: {
@@ -102,6 +112,13 @@ let tool = {
           name: slRecordToolName,
           version: `${bundleVersion}-${rc}`,
           requiredWhen: { type: 'always' },
+        },
+        {
+          type: 'tool_bundle',
+          name: slAnalyzeToolName,
+          version: `${bundleVersion}-${rc}`,
+          requiredWhen: { type: 'always' },
+          locality: 'host',
         },
       ],
     },
@@ -208,7 +225,7 @@ let tool = {
       },
     },
     {
-      id: 'reformatOnHost',
+      id: 'reformat_on_host',
       label: 'Reformat on host',
       description: 'Run analysis on the host instead of the target.',
       config: {
@@ -240,9 +257,13 @@ let tool = {
       result.advice.push(recordDeploymentProbe);
     }
 
+    const localisedEngine = ctx.params.reformat_on_host
+      ? engine.withLocality('host')
+      : engine;
+    const localisedPaths = getNeoprofPaths(localisedEngine);
     const analyzeDeploymentProbe = await probeDeployment(
-      engine,
-      paths.slAnalyzeDeployPath,
+      localisedEngine,
+      localisedPaths.slAnalyzeDeployPath,
       slAnalyzeToolName,
     );
     const analyzeDeployed = analyzeDeploymentProbe.level === 'ready';
@@ -268,7 +289,7 @@ let tool = {
 
       // Probe sl-analyze
       if (analyzeDeployed) {
-        let slAnalyzeProbe = await probeSlAnalyze(engine, ctx);
+        let slAnalyzeProbe = await probeSlAnalyze(localisedEngine, ctx);
         if (slAnalyzeProbe.level !== 'ready') {
           probeResponse.advice.push({
             message: slAnalyzeProbe.message,
@@ -380,7 +401,7 @@ let tool = {
       `Launch env vars: ${JSON.stringify(ctx.workload.environment)}`,
     );
 
-    if (!ctx.params.reformatOnHost) {
+    if (!ctx.params.reformat_on_host) {
       emitAnalysisFiles(engine, ctx, captureDirectory);
 
       if (engine.isFullCaptureSupportEnabled()) {
@@ -612,7 +633,7 @@ let tool = {
   },
 
   reformat: async (engine, ctx) => {
-    if (ctx.params.reformatOnHost) {
+    if (ctx.params.reformat_on_host) {
       return reformatOnHost(engine.withLocality('host'), ctx);
     }
 
@@ -667,7 +688,7 @@ async function reformatOnHost(engine, ctx) {
   await engine.copyFrom(
     'target',
     ctx.metadata.captureDirectory + '/**/*',
-    hostCaptureDirectory + '/*',
+    hostCaptureDirectory + '/**/*',
   );
 
   //
@@ -937,7 +958,7 @@ async function probeIpcMetric(engine, ctx) {
 }
 
 /**
- * Checks that `sl-analyze` exists and runs on the target.
+ * Checks that `sl-analyze` exists and runs. The command may execute on the target or host, depending on the engine locality.
  * @param {import("../recipes/docs/jsdocs").Engine} engine
  * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice>}
  */
@@ -950,13 +971,14 @@ async function probeSlAnalyze(engine, ctx) {
   const glibcVersionNotFoundStr = /version `GLIBC_(\d+\.\d+)' not found/;
   let glibcMatch = slAnalyzeCheck.stderr.match(glibcVersionNotFoundStr);
   if (slAnalyzeCheck.rc !== 0 && glibcMatch) {
+    const locality = engine.getLocality();
     engine.log(
       'error',
-      `Incompatible version of glibc on target (${glibcMatch[1]}).`,
+      `Incompatible version of glibc on ${locality} (${glibcMatch[1]}).`,
     );
     return {
       level: 'error',
-      message: `The target is using a version of the GNU C Library which is incompatible with the '${tool.name}' tool. Upgrade the GNU C Library on the target machine to at least version GLIBC_${glibcMatch[1]}, or use a different target machine with a newer operating system.`,
+      message: `The ${locality} is using a version of the GNU C Library which is incompatible with the '${tool.name}' tool. Upgrade the GNU C Library on the ${locality} machine to at least version GLIBC_${glibcMatch[1]}, or use a different ${locality} machine with a newer operating system.`,
     };
   }
   await checkAndThrowNeoprofError(
@@ -1637,7 +1659,7 @@ function emitCaptureDir(engine, outputDir) {
   ];
   engine.emitOutput(
     outputDir + '/**/*',
-    'capture.apc/*',
+    'capture.apc/**/*',
     {
       name: 'capture_apc',
       version: '1.0',
@@ -1932,7 +1954,7 @@ function emitDisassemblyFiles(engine, outputDir) {
  * @returns {void}
  */
 function emitNeoprofTimelineFiles(engine, outputDir) {
-  engine.emitOutput(outputDir + '/report-new/apx/**/*', 'output/parquet/*', {
+  engine.emitOutput(outputDir + '/report-new/apx/**/*', 'output/parquet/**/*', {
     name: 'neoprof_timeline',
     version: '1.0',
   });

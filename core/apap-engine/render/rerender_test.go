@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/perms"
 	"github.com/Arm-Debug/apap-cli/apap-engine/run"
 	"github.com/Arm-Debug/apap-cli/apap-engine/target"
@@ -112,18 +113,95 @@ func TestSessionRerender(t *testing.T) {
 		assert.ErrorIs(t, err, ErrRenderNoMatches)
 	})
 
+	t.Run("emit output supports structured wildcard overlays", func(t *testing.T) {
+		tempDir, err := rerender.CreateTempDirForRun(runID)
+		require.NoError(t, err)
+
+		filePathPattern := filepath.Join("report-new", "apx", "timeline", "series_id=*", "bin_duration=*", "counter.parquet")
+		sourceRelPath := filepath.Join("report-new", "apx", "timeline", "series_id=4", "bin_duration=10000", "counter.parquet")
+		sourceAbsPath := filepath.Join(tempDir, sourceRelPath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(sourceAbsPath), perms.LocalDirPerm))
+		require.NoError(t, os.WriteFile(sourceAbsPath, []byte("data"), perms.LocalFilePerm))
+
+		rendererRelPath := filepath.Join("render", "timeline", "series_id=*", "bin_duration=*", "counter.parquet")
+		meta := OutputMetadata{ComponentType: "rerender", Version: "1.0"}
+		err = rerender.EmitOutputForRun(runID, filePathPattern, rendererRelPath, meta)
+		require.NoError(t, err)
+
+		destRelPath := filepath.Join("render", "timeline", "series_id=4", "bin_duration=10000", "counter.parquet")
+		destAbsPath := filepath.Join(runCollection.GetRunPath(runID), rerenderPath, destRelPath)
+		info, err := os.Stat(destAbsPath)
+		require.NoError(t, err)
+		assert.False(t, info.IsDir())
+
+		entry := rerenderManifest.Lookup("render/timeline/series_id=*/bin_duration=*/counter.parquet")
+		require.NotNil(t, entry)
+		assert.Equal(t, meta.ComponentType, entry.ComponentType.Name)
+		assert.Equal(t, meta.Version, entry.ComponentType.SchemaVersion)
+	})
+
+	t.Run("emit output supports wildcard roots relative to temp dir", func(t *testing.T) {
+		tempDir, err := rerender.CreateTempDirForRun(runID)
+		require.NoError(t, err)
+
+		filePathPattern := filepath.Join("**", "counter.parquet")
+		sourceRelPath := filepath.Join("nested", "report", "counter.parquet")
+		sourceAbsPath := filepath.Join(tempDir, sourceRelPath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(sourceAbsPath), perms.LocalDirPerm))
+		require.NoError(t, os.WriteFile(sourceAbsPath, []byte("data"), perms.LocalFilePerm))
+
+		rendererRelPath := filepath.Join("render", "**", "counter.parquet")
+		meta := OutputMetadata{ComponentType: "rerender", Version: "1.0"}
+		err = rerender.EmitOutputForRun(runID, filePathPattern, rendererRelPath, meta)
+		require.NoError(t, err)
+
+		destRelPath := filepath.Join("render", "nested", "report", "counter.parquet")
+		destAbsPath := filepath.Join(runCollection.GetRunPath(runID), rerenderPath, destRelPath)
+		info, err := os.Stat(destAbsPath)
+		require.NoError(t, err)
+		assert.False(t, info.IsDir())
+
+		entry := rerenderManifest.Lookup("render/**/counter.parquet")
+		require.NotNil(t, entry)
+		assert.Equal(t, meta.ComponentType, entry.ComponentType.Name)
+		assert.Equal(t, meta.Version, entry.ComponentType.SchemaVersion)
+	})
+
 	t.Run("emit output glob errors when destination is not globbed", func(t *testing.T) {
 		tempDir, err := rerender.CreateTempDirForRun(runID)
 		require.NoError(t, err)
 
-		sourceRelPath := filepath.Join("output", "source.csv")
+		sourceRelPath := filepath.Join("report-new", "apx", "timeline", "series_id=4", "bin_duration=10000", "counter.parquet")
 		sourceAbsPath := filepath.Join(tempDir, sourceRelPath)
 		require.NoError(t, os.MkdirAll(filepath.Dir(sourceAbsPath), perms.LocalDirPerm))
 		require.NoError(t, os.WriteFile(sourceAbsPath, []byte("data"), perms.LocalFilePerm))
 
 		meta := OutputMetadata{ComponentType: "rerender", Version: "1.0"}
-		err = rerender.EmitOutputForRun(runID, filepath.Join("output", "*.csv"), filepath.Join("out", "result.csv"), meta)
-		assert.ErrorContains(t, err, "must contain exactly 1 '*'")
+		err = rerender.EmitOutputForRun(
+			runID,
+			filepath.Join("report-new", "apx", "timeline", "series_id=*", "bin_duration=*", "counter.parquet"),
+			filepath.Join("out", "result.csv"),
+			meta,
+		)
+		expected := message.New(message.EnginePathRemapWildcardSuffixMismatch).WithMetadata(map[string]string{
+			"localPath":  filepath.ToSlash(filepath.Join("out", "result.csv")),
+			"remoteBase": filepath.ToSlash(filepath.Join("report-new", "apx", "timeline", "series_id=*", "bin_duration=*", "counter.parquet")),
+		})
+		assert.ErrorIs(t, err, expected)
+		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
+
+		err = rerender.EmitOutputForRun(
+			runID,
+			filepath.Join("report-new", "apx", "timeline", "series_id=*", "bin_duration=*", "counter.parquet"),
+			filepath.Join("render", "timeline", "counter-*.parquet"),
+			meta,
+		)
+		expected = message.New(message.EnginePathRemapWildcardSuffixMismatch).WithMetadata(map[string]string{
+			"localPath":  filepath.ToSlash(filepath.Join("render", "timeline", "counter-*.parquet")),
+			"remoteBase": filepath.ToSlash(filepath.Join("report-new", "apx", "timeline", "series_id=*", "bin_duration=*", "counter.parquet")),
+		})
+		assert.ErrorIs(t, err, expected)
+		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
 	})
 
 	t.Run("emit output glob errors on unsupported metacharacters", func(t *testing.T) {

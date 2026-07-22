@@ -18,35 +18,60 @@
       "summary": "Cpp missing vectorization",
       "acts": ["act2"],
       "run_artifact": "test_case_01/latest.zip",
-      "rubric": "rubrics/test_case_01.md"
+      "rubric": "rubrics/test_case_01.md",
+      "performance_thresholds": {
+        "duration_seconds": 35,
+        "input_tokens": 59000,
+        "output_tokens": 1800
+      }
     },
     {
       "id": "test_case_02",
       "summary": "Cpp lock contention in hot loop",
       "acts": ["act2"],
       "run_artifact": "test_case_02/latest.zip",
-      "rubric": "rubrics/test_case_02.md"
+      "rubric": "rubrics/test_case_02.md",
+      "performance_thresholds": {
+        "duration_seconds": 38,
+        "input_tokens": 94000,
+        "output_tokens": 2000
+      }
     },
     {
       "id": "test_case_03",
       "summary": "Cpp missing crc32c specialization",
       "acts": ["act1"],
       "run_artifact": "test_case_03/latest.zip",
-      "rubric": "rubrics/test_case_03.md"
+      "rubric": "rubrics/test_case_03.md",
+      "performance_thresholds": {
+        "duration_seconds": 41,
+        "input_tokens": 96000,
+        "output_tokens": 2000
+      }
     },
     {
       "id": "test_case_04",
       "summary": "Cpp multithreaded allocator churn",
       "acts": ["act2"],
       "run_artifact": "test_case_04/latest.zip",
-      "rubric": "rubrics/test_case_04.md"
+      "rubric": "rubrics/test_case_04.md",
+      "performance_thresholds": {
+        "duration_seconds": 56,
+        "input_tokens": 140000,
+        "output_tokens": 2500
+      }
     },
     {
       "id": "test_case_05",
       "summary": "Cpp scalar arithmetic SIMD candidate",
       "acts": ["act2"],
       "run_artifact": "test_case_05/latest.zip",
-      "rubric": "rubrics/test_case_05.md"
+      "rubric": "rubrics/test_case_05.md",
+      "performance_thresholds": {
+        "duration_seconds": 43,
+        "input_tokens": 98000,
+        "output_tokens": 2000
+      }
     },
     {
       "id": "test_case_06",
@@ -60,28 +85,48 @@
       "summary": "Cpp call-return overhead in hot loop",
       "acts": ["act2"],
       "run_artifact": "test_case_07/latest.zip",
-      "rubric": "rubrics/test_case_07.md"
+      "rubric": "rubrics/test_case_07.md",
+      "performance_thresholds": {
+        "duration_seconds": 43,
+        "input_tokens": 110000,
+        "output_tokens": 2300
+      }
     },
     {
       "id": "test_case_08",
       "summary": "Cpp indirect call in hot loop",
       "acts": ["act2"],
       "run_artifact": "test_case_08/latest.zip",
-      "rubric": "rubrics/test_case_08.md"
+      "rubric": "rubrics/test_case_08.md",
+      "performance_thresholds": {
+        "duration_seconds": 60,
+        "input_tokens": 110000,
+        "output_tokens": 2600
+      }
     },
     {
       "id": "test_case_09",
       "summary": "Cpp allocation in hot loop",
       "acts": ["act2"],
       "run_artifact": "test_case_09/latest.zip",
-      "rubric": "rubrics/test_case_09.md"
+      "rubric": "rubrics/test_case_09.md",
+      "performance_thresholds": {
+        "duration_seconds": 64,
+        "input_tokens": 210000,
+        "output_tokens": 3300
+      }
     },
     {
       "id": "test_case_10",
       "summary": "Cpp overly strong atomic ordering",
       "acts": ["act2"],
       "run_artifact": "test_case_10/latest.zip",
-      "rubric": "rubrics/test_case_10.md"
+      "rubric": "rubrics/test_case_10.md",
+      "performance_thresholds": {
+        "duration_seconds": 39,
+        "input_tokens": 92000,
+        "output_tokens": 1900
+      }
     },
     {
       "id": "test_case_11",
@@ -95,14 +140,24 @@
       "summary": "Cpp missed optimized library path",
       "acts": ["act2"],
       "run_artifact": "test_case_12/latest.zip",
-      "rubric": "rubrics/test_case_12.md"
+      "rubric": "rubrics/test_case_12.md",
+      "performance_thresholds": {
+        "duration_seconds": 43,
+        "input_tokens": 97000,
+        "output_tokens": 2100
+      }
     },
     {
       "id": "test_case_13",
       "summary": "Cpp hot function without release optimization",
       "acts": ["act2"],
       "run_artifact": "test_case_13/latest.zip",
-      "rubric": "rubrics/test_case_13.md"
+      "rubric": "rubrics/test_case_13.md",
+      "performance_thresholds": {
+        "duration_seconds": 51,
+        "input_tokens": 110000,
+        "output_tokens": 2700
+      }
     },
     {
       "id": "test_case_14",
@@ -134,6 +189,11 @@
       "acts": ["act1"],
       "run_artifact": "test_case_16/latest.zip",
       "rubric": "rubrics/test_case_16.md",
+      "performance_thresholds": {
+        "duration_seconds": 53,
+        "input_tokens": 190000,
+        "output_tokens": 2600
+      },
       "recipe_params": ["collect_java_stacks=true"]
     },
     {
@@ -142,6 +202,11 @@
       "acts": ["act2"],
       "run_artifact": "test_case_17/latest.zip",
       "rubric": "rubrics/test_case_17.md",
+      "performance_thresholds": {
+        "duration_seconds": 68,
+        "input_tokens": 120000,
+        "output_tokens": 3500
+      },
       "recipe_params": ["collect_java_stacks=true"]
     },
     {
@@ -150,6 +215,11 @@
       "acts": ["act2"],
       "run_artifact": "test_case_18/latest.zip",
       "rubric": "rubrics/test_case_18.md",
+      "performance_thresholds": {
+        "duration_seconds": 51,
+        "input_tokens": 120000,
+        "output_tokens": 2600
+      },
       "recipe_params": ["collect_java_stacks=true"]
     },
     {
@@ -235,6 +305,11 @@
       "acts": ["act1"],
       "run_artifact": "test_case_28/latest.zip",
       "rubric": "rubrics/test_case_28.md",
+      "performance_thresholds": {
+        "duration_seconds": 34,
+        "input_tokens": 55000,
+        "output_tokens": 1800
+      },
       "recipe_params": ["collect_dotnet_stacks=true"]
     },
     {

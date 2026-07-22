@@ -43,6 +43,8 @@ from typing import Any
 
 import pytest
 
+from performance_quality import PERFORMIX_MCP_MODE
+
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from run_export_helper import sha256_file
 from rest_mode import REST_MODE, invoke_rest_mode
@@ -50,7 +52,6 @@ from rest_mode import REST_MODE, invoke_rest_mode
 DEFAULT_API_BASE = "https://openai-api-proxy.geo.arm.com/api/providers/openai/v1"
 HACKATHON_SERVER = "performix-hackathon"
 HACKATHON_TOOL = "atp_show_ai_insights"
-PERFORMIX_MCP_MODE = "performix_mcp"
 PERFORMIX_SERVER = "arm-performix"
 PERFORMIX_TOOL = "generate_ai_insights"
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}

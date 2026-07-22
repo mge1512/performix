@@ -90,14 +90,16 @@ tasks:
 
       Variables:
         TAG=<tag>              Prepare this internal tag. Defaults to the latest release tag.
+        LOCAL=true             Export this checkout as an untagged local snapshot.
+        COMMIT_MSG=<message>   Commit message for a LOCAL=true snapshot.
         PUBLIC_BRANCH=<branch> Public review branch printed in push guidance.
-        LOCAL_INTERNAL=true    Break-glass: export this checkout; requires TAG.
         MANIFEST_PATH=<path>   Use this ossmosis manifest instead of auto-discovery.
         RELEASE_WORKDIR=<path> Use this directory for local release checkouts.
     env:
       TAG: '{{default "" .TAG}}'
+      LOCAL: '{{default "false" .LOCAL}}'
+      COMMIT_MSG: '{{default "" .COMMIT_MSG}}'
       PUBLIC_BRANCH: '{{default "" .PUBLIC_BRANCH}}'
-      LOCAL_INTERNAL: '{{default "false" .LOCAL_INTERNAL}}'
       MANIFEST_PATH: '{{default "" .MANIFEST_PATH}}'
       RELEASE_WORKDIR: '{{default "" .RELEASE_WORKDIR}}'
     cmds:
@@ -112,32 +114,40 @@ tasks:
 
       Variables:
         TAG=<tag>              Prepare this internal tag. Defaults to the latest release tag.
+        LOCAL=true             Export this checkout as an untagged local snapshot.
+        COMMIT_MSG=<message>   Commit message for a LOCAL=true snapshot.
         PUBLIC_BRANCH=<branch> Public review branch printed in push guidance.
-        LOCAL_INTERNAL=true    Break-glass: export this checkout; requires TAG.
         MANIFEST_PATH=<path>   Use this ossmosis manifest instead of auto-discovery.
         RELEASE_WORKDIR=<path> Use this directory for local release checkouts.
     env:
       TAG: '{{default "" .TAG}}'
+      LOCAL: '{{default "false" .LOCAL}}'
+      COMMIT_MSG: '{{default "" .COMMIT_MSG}}'
       PUBLIC_BRANCH: '{{default "" .PUBLIC_BRANCH}}'
-      LOCAL_INTERNAL: '{{default "false" .LOCAL_INTERNAL}}'
       MANIFEST_PATH: '{{default "" .MANIFEST_PATH}}'
       RELEASE_WORKDIR: '{{default "" .RELEASE_WORKDIR}}'
     cmds:
       - '{{.ROOT_SYSTEM_PYTHON}} scripts/release/export-open-source.py --prepare'
 
   release:push:
-    desc: Push a reviewed public source snapshot and tag
+    desc: Push a reviewed public source snapshot
     summary: |
-      Push a prepared public source snapshot branch and matching tag.
+      Push a prepared public source snapshot branch, and the matching tag for
+      tagged releases.
       This task never exports or scans source; run release:prepare first and
-      inspect the generated local commit before pushing.
+      inspect the generated local commit before pushing. By default it pushes
+      the snapshot recorded by release:prepare.
 
       Variables:
-        TAG=<tag>              Required. Push the prepared snapshot for this tag.
-        PUBLIC_BRANCH=<branch> Public review branch. Defaults to performix/<tag>.
+        TAG=<tag>              Override the prepared state with a tagged release snapshot.
+        LOCAL=true             Override the prepared state with an untagged local snapshot.
+        COMMIT_MSG=<message>   Commit message for a LOCAL=true snapshot override.
+        PUBLIC_BRANCH=<branch> Public review branch. Defaults to prepared state or performix/<tag-or-message-slug>.
         RELEASE_WORKDIR=<path> Use this directory for local release checkouts.
     env:
       TAG: '{{default "" .TAG}}'
+      LOCAL: '{{default "false" .LOCAL}}'
+      COMMIT_MSG: '{{default "" .COMMIT_MSG}}'
       PUBLIC_BRANCH: '{{default "" .PUBLIC_BRANCH}}'
       RELEASE_WORKDIR: '{{default "" .RELEASE_WORKDIR}}'
     cmds:
@@ -159,13 +169,13 @@ tasks:
     desc: Check copyright and license metadata for the files planned for open source
     cmds:
       - task: deps:tools
-      - '{{.ROOT_VENV_PYTHON}} scripts/copyright-lint.py lint'
+      - '{{.ROOT_VENV_PYTHON}} scripts/release/copyright-lint.py lint'
 
   copyright:annotate:
     desc: Add SPDX metadata to first-party files that can be safely annotated automatically
     cmds:
       - task: deps:tools
-      - '{{.ROOT_VENV_PYTHON}} scripts/copyright-annotate.py'
+      - '{{.ROOT_VENV_PYTHON}} scripts/release/copyright-annotate.py'
 
   generate:
     desc: Generate project generated files (protobuf, codegen, etc.)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -231,10 +232,11 @@ func (r *RetrieveAgentFilesStage) Execute(stageCtx *recipe.StageContext) (func()
 	progressNotifier := r.createStageNotifer(stageCtx, fileInfos, transfers)
 
 	for transferI, f := range resolvedTransfers {
-		localIsGlob := len(f.LocalPath) > 0 && (f.LocalPath[len(f.LocalPath)-1] == '*')
+		localIsGlob := strings.ContainsRune(f.LocalPath, '*')
+		remoteIsGlob := strings.ContainsRune(f.RemotePath, '*')
 		remoteDoesntExist := len(fileInfos.Responses[transferI].FileInfos) == 1 && fileInfos.Responses[transferI].FileInfos[0].Error == os.ErrNotExist.Error()
 		// It's valid for glob extensions to not map to a file, when this occurs log & skip
-		if localIsGlob && remoteDoesntExist {
+		if localIsGlob && remoteIsGlob && remoteDoesntExist {
 			observer.OnTransferSkipped(r, f.FileTransfer, "glob expansion has no matches")
 			continue
 		}

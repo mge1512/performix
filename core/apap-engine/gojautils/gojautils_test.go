@@ -125,6 +125,50 @@ func TestGoObjectToJS(t *testing.T) {
 	})
 }
 
+func TestParseAndAdjustFrame(t *testing.T) {
+	t.Run("parses unix style frame and prefers source file name", func(t *testing.T) {
+		ah := &AsyncHelper{
+			SourceFileName: "/tmp/dummy",
+			LineOffset:     HelperInjectedLineCount(),
+		}
+
+		frame, ok := ah.parseAndAdjustFrame("\tat run (/tmp/dummy:29:4)")
+		require.True(t, ok)
+		assert.Equal(t, "dummy", frame.File)
+		assert.Equal(t, "run", frame.Function)
+		assert.Equal(t, 29-HelperInjectedLineCount(), frame.Line)
+		assert.Equal(t, 4, frame.Column)
+	})
+
+	t.Run("parses windows backslash frame and prefers basename from windows source path", func(t *testing.T) {
+		ah := &AsyncHelper{
+			SourceFileName: `D:\a\performix\performix\dummy`,
+			LineOffset:     HelperInjectedLineCount(),
+		}
+
+		frame, ok := ah.parseAndAdjustFrame("\tat run (D:\\a\\performix\\performix\\dummy:29:4)")
+		require.True(t, ok)
+		assert.Equal(t, "dummy", frame.File)
+		assert.Equal(t, "run", frame.Function)
+		assert.Equal(t, 29-HelperInjectedLineCount(), frame.Line)
+		assert.Equal(t, 4, frame.Column)
+	})
+
+	t.Run("parses windows slash frame and prefers basename from windows source path", func(t *testing.T) {
+		ah := &AsyncHelper{
+			SourceFileName: `D:\a\performix\performix\dummy`,
+			LineOffset:     HelperInjectedLineCount(),
+		}
+
+		frame, ok := ah.parseAndAdjustFrame("\tat run (D:/a/performix/performix/dummy:29:4)")
+		require.True(t, ok)
+		assert.Equal(t, "dummy", frame.File)
+		assert.Equal(t, "run", frame.Function)
+		assert.Equal(t, 29-HelperInjectedLineCount(), frame.Line)
+		assert.Equal(t, 4, frame.Column)
+	})
+}
+
 func TestSetPerformixGlobal(t *testing.T) {
 	vm := goja.New()
 	require.NoError(t, SetPerformixGlobal(vm))

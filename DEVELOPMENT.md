@@ -44,8 +44,6 @@ setting up your local development environment, by installing the necessary
 versions of required tools (task, node.js, golang, ...) in a user-specific
 location (without interfering with system-wide tools).
 
-Ensure you have configured `~/.npmrc` before bootstrapping.
-
 On macOS / Linux run:
 
 ```shell
@@ -124,7 +122,11 @@ Once prepared, use the narrower tasks as needed:
 | `task core:build`                           | Build `apx` and the target-side agent.                                              |
 | `task core:build:apx`                       | Build only the `apx` executable.                                                    |
 | `task core:build:agent`                     | Build only the target-side agent.                                                   |
-| `task core:test:unit`                       | Run CLI and engine unit tests.                                                      |
+| `task core:test:unit`                       | Run all core unit tests.                                                            |
+| `task core:test:unit:engine`                | Run engine Go unit tests.                                                           |
+| `task core:test:unit:apx`                   | Run CLI Go unit tests.                                                              |
+| `task core:test:unit:scripts`               | Run core Python script unit tests.                                                  |
+| `task core:test:unit:sysutil-timeline`      | Run sysutil-timeline Python unit tests.                                             |
 | `task core:test:robot TARGET=<target-name>` | Run Robot functional tests against a configured target.                             |
 | `task core:lint`                            | Run core linters and apply supported fixes.                                         |
 | `task core:clean`                           | Remove local core build outputs.                                                    |

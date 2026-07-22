@@ -58,6 +58,7 @@ func (sts *ScriptedToolSource) GetMigrations() []tool.Migration {
 // deployments. Note this is a minimal validation of the source, full validation occurs
 // when a new integration is created
 func LoadFromSource(source string, fileName string) (*ScriptedToolSource, error) {
+	fileName = util.CanonicalPath(fileName)
 
 	fullSource := gojautils.InjectAsyncHelpers(source)
 
@@ -216,8 +217,18 @@ func (g *boundGojaEngine) withLocality(name string) goja.Value {
 	return boundEngine
 }
 
+func (g *boundGojaEngine) getLocality() string {
+	return g.locality.Name
+}
+
 func (g *boundGojaEngine) toolsRoot() string {
 	return g.locality.ToolsRoot
+}
+
+func (g *boundGojaEngine) copyFrom(sourceLocality string, sourcePath string, destinationPath string) goja.Value {
+	return g.asyncHelper.AsyncOK(func() error {
+		return g.locality.CopyFrom(sourceLocality, sourcePath, destinationPath)
+	})
 }
 
 // Description fields for the tool integration
@@ -432,7 +443,9 @@ func (g *GojaToolInstance) newEngineObject(
 		{jsName: "isFullCaptureSupportEnabled", fn: vm.ToValue(bound.bec.IsFullCaptureSupportEnabled)},
 		{jsName: "isNeoprofTimelineEnabled", fn: vm.ToValue(bound.bec.IsNeoprofTimelineEnabled)},
 		{jsName: "withLocality", fn: vm.ToValue(bound.withLocality)},
+		{jsName: "getLocality", fn: vm.ToValue(bound.getLocality)},
 		{jsName: "toolsRoot", fn: vm.ToValue(bound.toolsRoot)},
+		{jsName: "copyFrom", fn: vm.ToValue(bound.copyFrom)},
 	} {
 		if err := jsEngine.Set(ef.jsName, ef.fn); err != nil {
 			return nil, err

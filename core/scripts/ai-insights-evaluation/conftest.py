@@ -42,6 +42,12 @@ import pytest
 import requests
 
 from evaluation_summary import render_console_summary
+from performance_quality import (
+    QUALITY_GOOD,
+    performance_metrics_for_attempt,
+    performance_thresholds_from_manifest,
+    recorded_performance_properties,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -713,6 +719,34 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
         terminalreporter.write_line(line)
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Record performance checks and fail an otherwise-passing testcase when needed."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when != "call":
+        return
+
+    attempt = _ai_properties(report)
+    if not attempt:
+        return
+
+    metrics = performance_metrics_for_attempt(
+        attempt,
+        performance_thresholds=_performance_thresholds(item.config),
+    )
+    report.user_properties.extend(recorded_performance_properties(metrics))
+    failures = [metric for metric in metrics if metric.quality != QUALITY_GOOD]
+    if not report.passed or not failures:
+        return
+
+    report.outcome = "failed"
+    report.longrepr = "AI Insights performance check failed: " + ", ".join(
+        f"{metric.label}={metric.value!r} ({metric.quality}, threshold={metric.threshold})"
+        for metric in failures
+    )
+
+
 def _ai_call_reports(terminalreporter) -> list:
     """Collect completed test-call reports that contain AI Insights metadata.
 
@@ -760,6 +794,18 @@ def _ai_attempts_from_reports(reports: list) -> list[dict[str, str]]:
             }
         )
     return attempts
+
+
+def _performance_thresholds(config) -> dict[str, dict[str, int | float]]:
+    # The report hook runs for every attempt, so parse the manifest only once
+    # and keep its thresholds on the pytest configuration for the rest of the run.
+    cached_thresholds = getattr(config, "_ai_insights_performance_thresholds", None)
+    if cached_thresholds is not None:
+        return cached_thresholds
+    manifest_path = Path(config.getoption("--ai-manifest")).expanduser().resolve()
+    thresholds = performance_thresholds_from_manifest(manifest_path)
+    config._ai_insights_performance_thresholds = thresholds
+    return thresholds
 
 
 def _format_suite_summary(summary: dict[str, str]) -> str:

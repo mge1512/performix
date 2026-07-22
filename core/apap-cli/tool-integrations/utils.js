@@ -156,7 +156,11 @@ async function probeDeployment(engine, deployPath, toolName) {
     return {
       level: 'error',
       messageCode: 'tool_integrations.common.TOOL_NOT_DEPLOYED',
-      metadata: { tool: toolName, deployPath: deployPath },
+      metadata: {
+        tool: toolName,
+        deployPath: deployPath,
+        locality: engine.getLocality(),
+      },
     };
   }
   return {
@@ -187,7 +191,11 @@ async function ensureDeployed(engine, deployPath, toolName) {
   if (!(await pathExists(engine, deployPath))) {
     throw {
       code: 'tool_integrations.common.TOOL_NOT_DEPLOYED',
-      metadata: { tool: toolName, deployPath: deployPath },
+      metadata: {
+        tool: toolName,
+        deployPath: deployPath,
+        locality: engine.getLocality(),
+      },
     };
   }
 }
