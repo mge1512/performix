@@ -215,6 +215,26 @@ class EvaluationSummaryTests(unittest.TestCase):
         self.assertNotIn("quality", summary)
         self.assertIn("PASS", summary)
 
+    def test_mcp_tool_failure_is_reported_as_a_warning(self):
+        attempts = [
+            {
+                "ai_test_id": "test_case_34",
+                "ai_mode": "performix_mcp",
+                "pytest_outcome": "passed",
+                "ai_display_scores": "pass",
+                "ai_judge_confidences": "high",
+                "ai_mcp_tool_calls_succeeded": "3",
+                "ai_mcp_tool_calls_failed": "1",
+            }
+        ]
+
+        console_summary = render_console_summary(attempts, width=200)
+        markdown_summary = render_markdown_summary(attempts)
+
+        for summary in (console_summary, markdown_summary):
+            self.assertIn("PASS", summary)
+            self.assertIn("Warning: 1 MCP tool call failed", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

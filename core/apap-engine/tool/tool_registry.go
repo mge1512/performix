@@ -14,6 +14,18 @@ type Factory interface {
 	GetMigrations() []Migration
 }
 
+type StopSupporter interface {
+	SupportsStop() bool
+}
+
+func SupportsStop(factory Factory) bool {
+	supporter, ok := factory.(StopSupporter)
+	if !ok {
+		return true
+	}
+	return supporter.SupportsStop()
+}
+
 // integrationID is a unique identifier for a tool integration, consisting of its name and version.
 type integrationID struct {
 	Name    string

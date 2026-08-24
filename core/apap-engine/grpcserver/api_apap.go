@@ -75,10 +75,12 @@ type ApapServerConfig struct {
 	LogFile                   string `json:"log-file"`
 	SourceToolsDir            string `json:"source-tools-dir"`
 	ConfigDirectory           string `json:"config-dir"`
+	ADBPath                   string `json:"adb-path"`
 }
 
 type ApapServer struct {
 	apapproto.UnimplementedApapServer
+	ctx                  context.Context
 	shutdownCb           func()
 	config               ApapServerConfig
 	deploymentPaths      deployer.BaseToolDeploymentPaths
@@ -90,6 +92,7 @@ type ApapServer struct {
 	recipeCommandMap     cmdsync.CommandStateMap
 	targetAccess         target.TargetAccess
 	targetSessions       targetsession.TargetSessionProvider
+	adbRunner            *conductor.ExecADBRunner
 	execPath             string
 	recipeFinder         func(recipeName string) (*recipe.Recipe, error)
 	parameterPipeline    runtime.ParameterPipeline
@@ -137,7 +140,9 @@ func NewApapServer(ctx context.Context, config ApapServerConfig, deploymentPaths
 	validator := &runtime.RecipeParameterValidatorConcrete{
 		OptionsEvaluator: optionsEvaluator,
 	}
+	adbRunner := conductor.NewExecADBRunner(config.ADBPath)
 	apapServer := &ApapServer{
+		ctx:              ctx,
 		shutdownCb:       shutdownCb,
 		config:           config,
 		runs:             rc,
@@ -147,8 +152,13 @@ func NewApapServer(ctx context.Context, config ApapServerConfig, deploymentPaths
 		sessions:         render.NewSessionStorage(),
 		deploymentPaths:  deploymentPaths,
 		recipeCommandMap: cmdsync.NewCommandStateMap(),
-		targetSessions:   targetsession.NewTargetSessionProvider(deploymentPaths.DeployedToolsDirectory, config.IsRootWorkerEnabled),
-		execPath:         execPath,
+		targetSessions: targetsession.NewTargetSessionProvider(
+			deploymentPaths.DeployedToolsDirectory,
+			config.IsRootWorkerEnabled,
+			adbRunner,
+		),
+		adbRunner: adbRunner,
+		execPath:  execPath,
 		recipeFinder: func(recipeName string) (*recipe.Recipe, error) {
 			return recipeparser.ParseRecipeHelper(recipeparser.FileRecipeReader{}, recipeName)
 		},
@@ -168,12 +178,18 @@ func NewApapServer(ctx context.Context, config ApapServerConfig, deploymentPaths
 	if err != nil {
 		return nil, message.New(message.EngineLifecycleStartupFailed).WithCause(err)
 	}
+	rm.StartRunSizeBackfill(ctx)
 
 	return apapServer, nil
 }
 
 func (s *ApapServer) GetVersion(ctx context.Context, in *emptypb.Empty) (*apapproto.ServiceVersion, error) {
 	return &apapproto.ServiceVersion{Version: versions.GetVersion()}, nil
+}
+
+func (s *ApapServer) SetAdbPath(ctx context.Context, in *apapproto.SetAdbPathRequest) (*emptypb.Empty, error) {
+	s.adbRunner.SetExecutable(in.GetPath())
+	return &emptypb.Empty{}, nil
 }
 
 func (s *ApapServer) recipeAllowed(recipeInfo recipe.Recipe) bool {
@@ -185,6 +201,13 @@ func (s *ApapServer) recipeAllowed(recipeInfo recipe.Recipe) bool {
 
 func (s *ApapServer) getFullCaptureSupport() bool {
 	return s.config.EnableFullCaptureSupport || s.config.EnableRerendering
+}
+
+func (s *ApapServer) engineContext() context.Context {
+	if s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
 }
 
 // newBaseStageConfiguration returns a StageConfiguration with server-owned config, shared by all stage workflows.
@@ -208,7 +231,7 @@ func (s *ApapServer) getRecipe(recipeName string) (*recipe.Recipe, error) {
 		return nil, err
 	}
 	if !s.recipeAllowed(*parsedRecipe) {
-		return nil, message.New(message.EngineRecipeDoesNotExist).WithMetadata(map[string]string{"recipe": recipeName})
+		return nil, message.New(message.EngineRecipeExperimentalDisabled).WithMetadata(map[string]string{"recipe": recipeName})
 	}
 	return parsedRecipe, nil
 }
@@ -337,7 +360,7 @@ func marshalInvokeRenderResponse(in *apapproto.InvokeRenderRequest, session rend
 			status.Status = &apapproto.RendererInvocationStatus_Pending{Pending: &apapproto.Pending{}}
 		} else {
 			status.Status = &apapproto.RendererInvocationStatus_Error{
-				Error: &apapproto.Error{Message: fmt.Sprintf("%v", invocationErrors[i])},
+				Error: &apapproto.Error{Message: invocationErrorMessage(invocationErrors[i])},
 			}
 		}
 
@@ -345,6 +368,17 @@ func marshalInvokeRenderResponse(in *apapproto.InvokeRenderRequest, session rend
 	}
 	response.VisualizationResolvedTables = MarshalResolvedVisualizationsToProto(session)
 	return &response, nil
+}
+
+func invocationErrorMessage(err error) string {
+	if catalogMsg, lookupErr := message.LookupMessage(err); lookupErr == nil {
+		msg := catalogMsg.Text()
+		if cause := errors.Unwrap(err); cause != nil && cause.Error() != "" {
+			return fmt.Sprintf("%s Cause: %s", msg, invocationErrorMessage(cause))
+		}
+		return msg
+	}
+	return err.Error()
 }
 
 func (s *ApapServer) PrepareRender(ctx context.Context, in *apapproto.PrepareRenderRequest) (*apapproto.PrepareRenderResponse, error) {
@@ -405,12 +439,13 @@ func (s *ApapServer) PrepareRender(ctx context.Context, in *apapproto.PrepareRen
 		runModels[i] = entry.Model
 	}
 
-	buildRenderConfig := func(renderParams map[string]any) *runtime.StageConfiguration {
+	buildRenderConfig := func(boundRenderParams *parameters.BoundRenderParameters) *runtime.StageConfiguration {
 		config := s.newBaseStageConfiguration()
 		config.Recipe = parsedRecipe
 		config.RunModels = runModels
 		config.Ctx = &recipe.RecipeCtx{
-			RenderParamValues: renderParams,
+			RenderParamValues: boundRenderParams.Values,
+			BoundRenderParams: boundRenderParams,
 			RecipeMetadata: recipe.RecipeMetadata{
 				Name:       parsedRecipe.Name,
 				Version:    parsedRecipe.Version,
@@ -420,8 +455,15 @@ func (s *ApapServer) PrepareRender(ctx context.Context, in *apapproto.PrepareRen
 		return config
 	}
 
-	renderConfig := buildRenderConfig(renderBound.CollapseToMap())
-	baselineSpec, err := runtime.GetRendererSpec(ctx, renderConfig, runDescriptions)
+	capabilities, err := run.LoadRunCapabilities(util.Map(content.Entries, func(entry render.ContentMapEntry) cdf.ModelView {
+		return entry.Model
+	}))
+	if err != nil {
+		return nil, err
+	}
+
+	renderConfig := buildRenderConfig(&renderBound)
+	baselineSpec, err := runtime.GetRendererSpec(ctx, renderConfig, runDescriptions, capabilities)
 	if err != nil {
 		return nil, err
 	}
@@ -450,8 +492,8 @@ func (s *ApapServer) PrepareRender(ctx context.Context, in *apapproto.PrepareRen
 		}
 
 		// Re-run render stages with mapped params, then ensure topology/bindings are unchanged.
-		renderConfig = buildRenderConfig(renderBound.CollapseToMap())
-		rendererSpec, err = runtime.GetRendererSpec(ctx, renderConfig, runDescriptions)
+		renderConfig = buildRenderConfig(&renderBound)
+		rendererSpec, err = runtime.GetRendererSpec(ctx, renderConfig, runDescriptions, capabilities)
 		if err != nil {
 			return nil, err
 		}
@@ -608,7 +650,7 @@ func (s *ApapServer) TargetPrepare(ctx context.Context, in *apapproto.TargetPrep
 
 	lock := s.targetAccess.LockWithCancellation(tgt, "target prepare", ctx.Done())
 	if lock == nil {
-		return nil, message.New(message.EngineCommonUserCancellationError)
+		return nil, message.New(message.EngineCommonUserCanceled)
 	}
 	defer lock.Unlock()
 
@@ -631,7 +673,7 @@ func (s *ApapServer) TargetInfoCollector(ctx context.Context, in *apapproto.Targ
 
 	lock := s.targetAccess.LockWithCancellation(tgt, "target info", ctx.Done())
 	if lock == nil {
-		return nil, message.New(message.EngineCommonUserCancellationError)
+		return nil, message.New(message.EngineCommonUserCanceled)
 	}
 	defer lock.Unlock()
 	targetSession, err := s.targetSessions.TargetSession(tgt)
@@ -649,7 +691,10 @@ func (s *ApapServer) TargetInfoCollector(ctx context.Context, in *apapproto.Targ
 
 	stream, err := agentConn.Client.HoldLock(ctx, &emptypb.Empty{})
 	if err != nil {
-		return nil, message.New(message.EngineCommonUserCancellationError)
+		if cancelErr := message.CancellationError(ctx, err); cancelErr != nil {
+			return nil, cancelErr
+		}
+		return nil, err
 	}
 	_, err = stream.Recv()
 	if err != nil {
@@ -700,27 +745,19 @@ func (s *ApapServer) RecipeIssueCommand(in *apapproto.RecipeCommand, out apappro
 	var err error
 	switch command := in.SpecificCommand.(type) {
 	case *apapproto.RecipeCommand_StartCommand:
-		hook, ctx := runtime.InitializeRunLog(out.Context())
-		defer hook.Close()
-		logx.FromContext(ctx).Infof("Starting run using %v Engine %v", terminology.GetProductFullName(), versions.GetVersion())
-
-		// Create stage notifier
+		detachBackgroundTransfers := command.StartCommand.GetDetachBackgroundTransfers() && s.config.EnableTransferManager
 		grpcNotifier := &progress.GRPCRecipeStageNotifier{Out: out}
-		stageNotifier := recipe.NewCompositeStageNotifier(
-			grpcNotifier,
-			recipe.NewLoggingStageNotifier(logx.FromContext(ctx)),
-		)
 
 		parsedRecipe, err := s.getRecipe(command.StartCommand.GetName())
 		if err != nil {
-			logx.FromContext(ctx).WithError(err).Error("failed to parse recipe")
+			logx.FromContext(out.Context()).WithError(err).Error("failed to parse recipe")
 			grpcNotifier.SendRecipeFinishMessage(out, apapproto.StatusCode_ERROR, message.BuildErrorChain(err))
 			return err
 		}
 
 		recipeCtx, err := RecipeCtxFromProto(command.StartCommand)
 		if err != nil {
-			logx.FromContext(ctx).WithError(err).Error("failed to construct recipe context")
+			logx.FromContext(out.Context()).WithError(err).Error("failed to construct recipe context")
 			grpcNotifier.SendRecipeFinishMessage(out, apapproto.StatusCode_ERROR, message.BuildErrorChain(err))
 			return err
 		}
@@ -732,7 +769,7 @@ func (s *ApapServer) RecipeIssueCommand(in *apapproto.RecipeCommand, out apappro
 
 		recipeCtx.ParamValues, err = parameters.BindRecipeParameters(convertedParams, parsedRecipe.Parameters, parsedRecipe.Name)
 		if err != nil {
-			logx.FromContext(ctx).WithError(err).Error("parameter setup failed")
+			logx.FromContext(out.Context()).WithError(err).Error("parameter setup failed")
 			grpcNotifier.SendRecipeFinishMessage(out, apapproto.StatusCode_ERROR, message.BuildErrorChain(err))
 			return err
 		}
@@ -740,7 +777,6 @@ func (s *ApapServer) RecipeIssueCommand(in *apapproto.RecipeCommand, out apappro
 		recipeCtx.RecipeMetadata.APIVersion = parsedRecipe.APIVersion
 		recipeCtx.ToolVersions = parsedRecipe.ToolVersions
 
-		// Run the recipe.
 		stageConfig := s.newBaseStageConfiguration()
 		stageConfig.Recipe = parsedRecipe
 		stageConfig.Ctx = recipeCtx
@@ -748,22 +784,35 @@ func (s *ApapServer) RecipeIssueCommand(in *apapproto.RecipeCommand, out apappro
 		stageConfig.ToolDeploymentType = deployer.ToolDeploymentMode(command.StartCommand.DeploymentType)
 		stageConfig.UsrMessageWriter = &run.ConcreteUserMessageWriter{}
 		stageConfig.CollectionState = &recipe.CollectionState{}
-		err = runtime.RunRecipe(
-			ctx,
-			hook,
+		job := runtime.StartRecipeJob(
+			s.engineContext(),
 			stageConfig,
 			&runtime.RunStageFactory{},
-			stageNotifier,
+			grpcNotifier,
 			s.recipeCommandMap,
+			detachBackgroundTransfers,
 		)
 
-		// When the run completes, stream the finish message (and result) back to the client
+		jobCompleted, err := awaitRecipeJob(
+			out.Context(),
+			job.Done(),
+			job.Phase1Done(),
+			job.Cancel,
+			detachBackgroundTransfers,
+		)
+		if !jobCompleted {
+			if err == nil {
+				grpcNotifier.SendDetachedRecipeFinishMessage(out)
+			}
+			return err
+		}
+
 		returnCode := apapproto.StatusCode_SUCCESS
 		if err != nil {
-			logx.FromContext(ctx).WithError(err).Error("recipe run failed")
 			returnCode = apapproto.StatusCode_ERROR
 		}
 		grpcNotifier.SendRecipeFinishMessage(out, returnCode, message.BuildErrorChain(err))
+		return err
 
 	case *apapproto.RecipeCommand_CancelCommand:
 		// Write CANCEL flag
@@ -783,6 +832,53 @@ func (s *ApapServer) RecipeIssueCommand(in *apapproto.RecipeCommand, out apappro
 	}
 
 	return err
+}
+
+// awaitRecipeJob waits for full completion, phase 1 completion, or client cancellation.
+// The boolean result reports whether the job fully completed and should send its final status.
+func awaitRecipeJob(
+	ctx context.Context,
+	done <-chan error,
+	phase1Done <-chan struct{},
+	cancel func(),
+	detachBackgroundTransfers bool,
+) (bool, error) {
+	if detachBackgroundTransfers {
+		// Detached CLI requests return on either full job completion, phase1 completion, or client disconnects.
+		select {
+		case err := <-done:
+			return true, err
+		case <-phase1Done:
+			select {
+			// Handle the case when the job completed at the same time as phase1 complete.
+			case err := <-done:
+				return true, err
+			default:
+				return false, nil
+			}
+		case <-ctx.Done():
+			select {
+			// Handle the case when phase1 completed at the same time as the RPC cancellation, in which case allow the job to continue detached.
+			// Otherwise, cancel the job.
+			case <-phase1Done:
+				return false, ctx.Err()
+			default:
+				cancel()
+				<-done
+				return false, ctx.Err()
+			}
+		}
+	}
+
+	// Attached runs retain the RPC lifetime: cancellation stops the job and waits for cleanup.
+	select {
+	case err := <-done:
+		return true, err
+	case <-ctx.Done():
+		cancel()
+		<-done
+		return false, ctx.Err()
+	}
 }
 
 func (s *ApapServer) ListRuns(ctx context.Context, _ *emptypb.Empty) (*apapproto.RunListing, error) {

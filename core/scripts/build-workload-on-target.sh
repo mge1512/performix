@@ -16,13 +16,21 @@ REMOTE_ROOT="${REMOTE_ROOT:-}"
 WORKLOAD_ARGS="${WORKLOAD_ARGS:-}"
 SKIP_WORKLOAD_CHECKOUT="${SKIP_WORKLOAD_CHECKOUT:-false}"
 
+# Package-provided workloads do not use the workloads repository.
+NEEDS_WORKLOAD_REPO=true
+case "${WORKLOAD}" in
+  openssl-speed)
+    NEEDS_WORKLOAD_REPO=false
+    ;;
+esac
+
 missing=()
 for required in TARGET_USER TARGET_IP SSH_KEY WORKLOAD REMOTE_ROOT; do
   if [ -z "${!required}" ]; then
     missing+=( "${required}" )
   fi
 done
-if [ "${SKIP_WORKLOAD_CHECKOUT}" != "true" ] && [ -z "${GH_TOKEN}" ]; then
+if [ "${NEEDS_WORKLOAD_REPO}" = "true" ] && [ "${SKIP_WORKLOAD_CHECKOUT}" != "true" ] && [ -z "${GH_TOKEN}" ]; then
   missing+=( "GH_TOKEN" )
 fi
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -35,7 +43,7 @@ REMOTE_WORKLOADS="${REMOTE_ROOT}/workloads"
 REMOTE_DCPERF_DIR="${REMOTE_ROOT}/DCPerf"
 
 echo "Building workload '${WORKLOAD}' on target ${TARGET}..."
-ssh -i "${SSH_KEY}" ${TARGET} "WORKLOAD=${WORKLOAD} WORKLOAD_REF=${WORKLOAD_REF} WORKLOAD_REPO=${WORKLOAD_REPO} GH_TOKEN=${GH_TOKEN} REMOTE_ROOT=${REMOTE_ROOT} REMOTE_WORKLOADS=${REMOTE_WORKLOADS} REMOTE_DCPERF_DIR=${REMOTE_DCPERF_DIR} SKIP_WORKLOAD_CHECKOUT=${SKIP_WORKLOAD_CHECKOUT} bash -s" <<'ENDSSH'
+ssh -i "${SSH_KEY}" ${TARGET} "WORKLOAD=${WORKLOAD} WORKLOAD_REF=${WORKLOAD_REF} WORKLOAD_REPO=${WORKLOAD_REPO} GH_TOKEN=${GH_TOKEN} REMOTE_ROOT=${REMOTE_ROOT} REMOTE_WORKLOADS=${REMOTE_WORKLOADS} REMOTE_DCPERF_DIR=${REMOTE_DCPERF_DIR} SKIP_WORKLOAD_CHECKOUT=${SKIP_WORKLOAD_CHECKOUT} NEEDS_WORKLOAD_REPO=${NEEDS_WORKLOAD_REPO} bash -s" <<'ENDSSH'
 set -euo pipefail
 
 mkdir -p "${REMOTE_ROOT}"
@@ -61,28 +69,35 @@ apt_get_with_retry() {
 mkdir -p "${REMOTE_ROOT}"
 cd "${REMOTE_ROOT}"
 
-# Ensure prerequisites for building workloads are present on target
+# Ensure prerequisites for preparing workloads are present on target
 apt_get_with_retry update
-apt_get_with_retry install -y git build-essential
 
-# Fetch workloads repository on target (shallow clone)
-if [ "${SKIP_WORKLOAD_CHECKOUT}" != "true" ]; then
-  if [ ! -d "${REMOTE_WORKLOADS}" ]; then
-    git clone --depth 1 --branch "${WORKLOAD_REF}" "https://${GH_TOKEN}@github.com/Arm-Debug/performix-workloads.git" "${REMOTE_WORKLOADS}"
+if [ "${NEEDS_WORKLOAD_REPO}" = "true" ]; then
+  apt_get_with_retry install -y git build-essential
+
+  # Fetch workloads repository on target (shallow clone)
+  if [ "${SKIP_WORKLOAD_CHECKOUT}" != "true" ]; then
+    if [ ! -d "${REMOTE_WORKLOADS}" ]; then
+      git clone --depth 1 --branch "${WORKLOAD_REF}" "https://${GH_TOKEN}@github.com/Arm-Debug/performix-workloads.git" "${REMOTE_WORKLOADS}"
+    else
+      cd "${REMOTE_WORKLOADS}"
+      git fetch --depth 1 origin "${WORKLOAD_REF}"
+      git checkout -f "${WORKLOAD_REF}" || git checkout -f "origin/${WORKLOAD_REF}" || true
+      git reset --hard "origin/${WORKLOAD_REF}" || true
+      cd "${REMOTE_ROOT}"
+    fi
   else
-    cd "${REMOTE_WORKLOADS}"
-    git fetch --depth 1 origin "${WORKLOAD_REF}"
-    git checkout -f "${WORKLOAD_REF}" || git checkout -f "origin/${WORKLOAD_REF}" || true
-    git reset --hard "origin/${WORKLOAD_REF}" || true
-    cd "${REMOTE_ROOT}"
+    if [ ! -d "${REMOTE_WORKLOADS}" ]; then
+      echo "Workloads repository not found: ${REMOTE_WORKLOADS}"
+      exit 1
+    fi
+    echo "Using existing workload checkout at ${REMOTE_WORKLOADS}"
   fi
-else
-  echo "Using existing workload checkout at ${REMOTE_WORKLOADS}"
+
+  cd "${REMOTE_WORKLOADS}"
 fi
 
-cd "${REMOTE_WORKLOADS}"
-
-# AI Insights tests use their own CMake project under ai_insights_tests.
+# Workloads with custom preparation do not use the standard build script path.
 case "${WORKLOAD}" in
   ai_insights_tests/*)
     test_id="${WORKLOAD#ai_insights_tests/}"
@@ -110,6 +125,10 @@ case "${WORKLOAD}" in
       echo "AI Insights workload ELF binary lacks debug info: ${workload_bin}"
       exit 1
     fi
+    exit 0
+    ;;
+  openssl-speed)
+    apt_get_with_retry install -y openssl
     exit 0
     ;;
 esac
@@ -189,6 +208,10 @@ elif [ "$WORKLOAD_NAME" = "nosqlbench-cassandra" ]; then
   )"
   WORKLOAD_ARR=( "${WORKLOAD_EXEC}" )
   DEFAULT_ARGS="--workload /opt/nosqlbench/workloads/cql_keyvalue.yaml --driver cql --main-block main_write --main-cycles 50M --threads auto"
+
+elif [ "$WORKLOAD_NAME" = "openssl-speed" ]; then
+  WORKLOAD_ARR=( "openssl" "speed" )
+  DEFAULT_ARGS="-seconds 60 -elapsed -evp aes-256-gcm"
 
 elif [ "$WORKLOAD_NAME" = "stress-ng" ]; then
   WORKLOAD_ARR=( "${REMOTE_ROOT}/workloads/stress-ng/stress-ng-src/stress-ng" )

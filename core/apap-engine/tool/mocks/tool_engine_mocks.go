@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
+	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool"
 	"github.com/Arm-Debug/apap-cli/atperf-agent/process"
 )
@@ -30,6 +31,10 @@ func (m *MockEngineContext) StartProcess(opts *process.StartProcess) (tool.Proce
 func (m *MockEngineContext) CreateTempDir() (string, error) {
 	args := m.Called()
 	return args.String(0), args.Error(1)
+}
+
+func (m *MockEngineContext) PreserveTempDir(path string) error {
+	return m.Called(path).Error(0)
 }
 
 func (m *MockEngineContext) CreateRunFile(path string) (tool.FileHandle, error) {
@@ -60,6 +65,11 @@ func (m *MockEngineContext) UpdateProgress(id, message string, percent float64) 
 }
 func (m *MockEngineContext) EndProgress(id string) error { return m.Called(id).Error(0) }
 
+func (m *MockEngineContext) GetPlatform() conductor.PlatformConfiguration {
+	args := m.Called()
+	return args.Get(0).(conductor.PlatformConfiguration)
+}
+
 type MockProcessHandle struct {
 	mock.Mock
 }
@@ -86,7 +96,6 @@ func (m *MockProcessHandle) WriteStdin(data string) error { return m.Called(data
 
 type MockFileHandle struct {
 	mock.Mock
-	PathValue string
 }
 
 func (m *MockFileHandle) Append(data string) error {
@@ -97,8 +106,9 @@ func (m *MockFileHandle) Close() error {
 	return m.Called().Error(0)
 }
 
-func (m *MockFileHandle) Path() string {
-	return m.PathValue
+func (m *MockFileHandle) Path() (string, error) {
+	args := m.Called()
+	return args.String(0), args.Error(1)
 }
 
 type ToolIntegrationMock struct {
@@ -138,6 +148,11 @@ func (m *ToolIntegrationMock) Cancel() error {
 func (m *ToolIntegrationMock) Reformat() error {
 	args := m.Called()
 	return args.Error(0)
+}
+
+func (m *ToolIntegrationMock) CollectionFinished() <-chan struct{} {
+	args := m.Called()
+	return args.Get(0).(<-chan struct{})
 }
 
 type MockFileCollector struct {

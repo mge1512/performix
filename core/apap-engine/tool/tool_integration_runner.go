@@ -16,9 +16,8 @@ import (
 
 var errToolRunCancelled = errors.New("tool run cancelled")
 
-// timeoutFallbackGracePeriod is added on top of the configured collection timeout before
-// the engine requests a graceful stop. This accounts for collector startup overhead and
-// ensures the tool has had a fair chance to self-terminate via its own timeout mechanism.
+// timeoutFallbackGracePeriod gives a tool time to terminate after its configured timeout
+// or after it reports that collection has finished.
 // Declared as var (not const) to enable tests to override it with a shorter duration.
 var timeoutFallbackGracePeriod = 10 * time.Second
 
@@ -42,9 +41,8 @@ func drainErrChan(runErr error, errCh <-chan error) error {
 // RunToolIntegration runs a single tool integration, waits for it to complete,
 // and handles stop and cancel requests.
 //
-// If timeout is non-zero, the engine will request a graceful stop after
-// (timeout + timeoutFallbackGracePeriod) has elapsed without the tool completing.
-// This is a fallback for collectors that fail to self-terminate on their own timeout.
+// Integrations that report collection completion get timeoutFallbackGracePeriod to
+// terminate. Other integrations get the configured timeout plus that grace period.
 func RunToolIntegration(ctx context.Context, stopCh, cancelCh <-chan struct{}, timeout time.Duration, tr ToolIntegration) error {
 	select {
 	case <-cancelCh:
@@ -71,37 +69,47 @@ func RunToolIntegration(ctx context.Context, stopCh, cancelCh <-chan struct{}, t
 	props := tr.Properties()
 
 	// Listen for stop requests until run completes or a cancel arrives.
-	// When a timeout is configured, a fallback timer is also armed: if the tool has not
-	// completed by (timeout + timeoutFallbackGracePeriod) the engine requests a graceful
-	// stop using the same mechanism as the GUI Stop button.
-	//
-	// timeoutC is nil when no timeout is configured. In Go, a receive on a nil channel
-	// blocks forever and is never selected, so the timer case below is simply inert when
-	// there is no timeout — no separate code path is needed.
-	var timeoutC <-chan time.Time
-	if timeout > 0 {
-		timer := time.NewTimer(timeout + timeoutFallbackGracePeriod)
-		defer timer.Stop()
-		timeoutC = timer.C
-	}
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		log := logx.FromContext(ctx).
 			WithField("name", props.Name).
 			WithField("version", props.Version)
-		select {
-		case <-stopCh:
-			log.Info("Stopping tool")
-		case <-timeoutC:
-			log.Warn("Collection timeout elapsed with tool still running; engine fallback stop requested")
-		case <-runDone:
-			return
-		case <-cancelCh:
-			return
+
+		collectionFinishedCh := tr.CollectionFinished()
+		var timer *time.Timer
+		var timeoutC <-chan time.Time
+		if collectionFinishedCh == nil && timeout > 0 {
+			timer = time.NewTimer(timeoutFallbackGracePeriod + timeout)
+			timeoutC = timer.C
 		}
-		errCh <- tr.Stop()
+
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
+
+		for {
+			select {
+			case <-collectionFinishedCh:
+				collectionFinishedCh = nil
+				timer = time.NewTimer(timeoutFallbackGracePeriod)
+				timeoutC = timer.C
+			case <-stopCh:
+				log.Info("Stopping tool")
+				errCh <- tr.Stop()
+				return
+			case <-timeoutC:
+				log.Warn("Tool termination timeout elapsed with tool still running; engine fallback stop requested")
+				errCh <- tr.Stop()
+				return
+			case <-runDone:
+				return
+			case <-cancelCh:
+				return
+			}
+		}
 	}()
 
 	// Listen for cancel requests until run completes.

@@ -7,6 +7,7 @@ Documentation       A test suite to verify the functionality of the 'neoprof' to
 Resource            ../../resources/keywords/common.resource
 Resource            ../../resources/keywords/process.resource
 Resource            ../../resources/keywords/recipe.resource
+Resource            ../../resources/keywords/render.resource
 Resource            ../../resources/keywords/run.resource
 Resource            ../../resources/keywords/target.resource
 
@@ -40,7 +41,7 @@ The Neoprof Tool Integration Returns Workload Isn't Executable Error
   And Ensure The File Is Created On The Target  ${TEMP_FILE_PATH}
   And The File Is Not Executable On The Target  ${TEMP_FILE_PATH}
   When Run Code Hotspots Recipe  --workload ${TEMP_FILE_PATH} --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
-  Then The Last Command Failed With Message Code  tool_integrations.common.WORKLOAD_NOT_EXIST_OR_NOT_EXECUTABLE
+  Then The Last Command Failed With Message Code  tool_integrations.common.WORKLOAD_NOT_EXECUTABLE
   And The Target Output Directory Is Empty
   [Teardown]  The File Is Removed From The Target  ${TEMP_FILE_PATH}
 
@@ -50,7 +51,8 @@ The Neoprof Tool Integration Returns Workload File Not Found Error
   ...  causing the kernel to emit "No such file or directory" when attempting to exec it
   Given The Code Hotspots Recipe Is Listed
   And The Test Target Exists
-  When Run Code Hotspots Recipe  --workload "bash script_that_does_not_exist.sh" --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
+  When Run Code Hotspots Recipe
+  ...  --workload "bash script_that_does_not_exist.sh" --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
   Then The Last Command Failed With Message Code  tool_integrations.neoprof.WORKLOAD_FILE_NOT_FOUND
   And The Target Output Directory Is Empty
 
@@ -81,20 +83,21 @@ The Neoprof Tool Integration Returns No Samples Collected Error
   # This test is disabled because it's unreliable. Only re-enable when we have a more deterministic way to ensure no
   # samples are collected. See APAP-4648 for details.
   [Tags]  disabled
+  [Setup]  Run Keyword And Ignore Error  The Output Directory Is Removed From The Target
   Given The Code Hotspots Recipe Is Listed
   And The Test Target Exists
   And The Target Is Prepared
-  Wait Until Keyword Succeeds  3x  0s  Verify No Samples Collected
+  When Run Code Hotspots Recipe  --workload "true" --param sampling_freq=low --target ${G_TARGET_NAME}
+  Then The Last Command Failed With Message Code  tool_integrations.neoprof.NO_SAMPLES_COLLECTED
+  And The Target Output Directory Is Empty
+  [Teardown]  Run Keyword And Ignore Error  The Output Directory Is Removed From The Target
 
 The Neoprof Tool Passes Environment Variables To The Inline Workload
   [Documentation]  Tests the neoprof tool integration passes the environment
   ...  variables provided by the user through to the inline workload
   Given The Code Hotspots Recipe Is Listed
   And The Test Target Exists
-  ${code_hotspots_args} =  Catenate  --workload "bash -c \\"echo \\\\\\"this is \$FOO\\\\\\"\\""
-  ...  --env FOO=bar --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
-  ${escaped} =  Escape Dollar If Needed  ${code_hotspots_args}
-  When Run Code Hotspots Recipe  ${escaped}
+  When Run Code Hotspots Recipe With Environment Variables In Workload
   And The Last Command Succeeded
   Then The Neoprof Capture Log Contains  this is bar
 
@@ -104,7 +107,8 @@ The Neoprof Tool Passes Environment Variables To The Workload Script
   Given The Code Hotspots Recipe Is Listed
   And The Test Target Exists
   And The Script Is Created On The Target  ${TEMP_FILE_PATH}  echo "this is \$FOO"
-  When Run Code Hotspots Recipe  --workload ${TEMP_FILE_PATH} --env FOO=bar --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
+  When Run Code Hotspots Recipe
+  ...  --workload ${TEMP_FILE_PATH} --env FOO=bar --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
   And The Last Command Succeeded
   Then The Neoprof Capture Log Contains  this is bar
   [Teardown]  The File Is Removed From The Target  ${TEMP_FILE_PATH}
@@ -115,7 +119,8 @@ The Neoprof Tool Uses The Specified Working Dir To Launch The Workload
   Given The Code Hotspots Recipe Is Listed
   And The Test Target Exists
   And The Script Is Created On The Target  ${TEMP_FILE_PATH}  echo "this is a test"
-  When Run Code Hotspots Recipe  --workload ./${TEMP_FILE_NAME} --working-dir ${ATPERF_DIR} --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
+  When Run Code Hotspots Recipe
+  ...  --workload ./${TEMP_FILE_NAME} --working-dir ${ATPERF_DIR} --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
   And The Last Command Succeeded
   Then The Neoprof Capture Log Contains  this is a test
   [Teardown]  The File Is Removed From The Target  ${TEMP_FILE_PATH}
@@ -127,7 +132,8 @@ The Neoprof Tool Uses The Specified Working Dir Within The Workload
   And The Test Target Exists
   And The Script Is Created On The Target  ${TEMP_FILE_PATH}  echo "file 1"; ./${TEMP_FILE_NAME_2}
   And The Script Is Created On The Target  ${TEMP_FILE_PATH_2}  echo "file 2"
-  When Run Code Hotspots Recipe  --workload ./${TEMP_FILE_NAME} --working-dir ${ATPERF_DIR} --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
+  When Run Code Hotspots Recipe
+  ...  --workload ./${TEMP_FILE_NAME} --working-dir ${ATPERF_DIR} --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
   And The Last Command Succeeded
   Then The Neoprof Capture Log Contains  file 1
   And The Neoprof Capture Log Contains  file 2
@@ -152,16 +158,30 @@ The Neoprof Tool Reports As Not Ready When Workload Does Not Exist
   Given The Code Hotspots Recipe Is Listed
   When Check Recipe Is Ready  code_hotspots  --workload my-made-up-workload --target ${G_TARGET_NAME}
   Then The Recipe Is Not Ready
-  And Check Advice Messages Contain  "The specified command does not exist or is not executable. Please verify this executable exists."
+  And Check Advice Messages Contain
+  ...  "The specified command does not exist. Please verify this executable exists."
 
 The Neoprof Tool Reports As Ready When Workload Exists Using Working Dir
   [Documentation]  Tests that the neoprof tool integration correctly reports as ready
   ...  when the workload exists on the target using the specified working directory.
   Given The Code Hotspots Recipe Is Listed
   When The Script Is Created On The Target  ${TEMP_FILE_PATH}  ls
-  And Check Recipe Is Ready  code_hotspots  --workload "./${TEMP_FILE_NAME}" --working-dir ${ATPERF_DIR} --target ${G_TARGET_NAME}
+  And Check Recipe Is Ready
+  ...  code_hotspots
+  ...  --workload "./${TEMP_FILE_NAME}" --working-dir ${ATPERF_DIR} --target ${G_TARGET_NAME}
   Then The Recipe Is Ready
   [Teardown]  The File Is Removed From The Target  ${TEMP_FILE_PATH}
+
+The Neoprof Tool Supports Reformat On Host
+  [Documentation]  Tests the host-side reformat path using Linux targets
+  [Tags]  reformat-on-host
+  [Setup]  Skip Unless Target OS Is  ${OS_LINUX}
+  Given The Code Hotspots Recipe Is Listed
+  And The Test Target Exists
+  When Run Code Hotspots Recipe  --param reformat_on_host=true --workload ${LAUNCH_WORKLOAD} --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
+  Then The Last Command Succeeded
+  And The Reformat On Host Run Is Recorded
+  And Runs Are Rendered Successfully  ${RUN_ID}
 
 
 *** Keywords ***
@@ -179,8 +199,8 @@ Neoprof Suite Teardown
   Common Teardown
 
 Set Suite Variables
-  VAR  ${TEMP_FILE_PATH}  ${ATPERF_DIR}/${TEMP_FILE_NAME}  scope=SUITE
-  VAR  ${TEMP_FILE_PATH_2}  ${ATPERF_DIR}/${TEMP_FILE_NAME_2}  scope=SUITE
+  VAR  ${TEMP_FILE_PATH} =  ${ATPERF_DIR}/${TEMP_FILE_NAME}  scope=SUITE
+  VAR  ${TEMP_FILE_PATH_2} =  ${ATPERF_DIR}/${TEMP_FILE_NAME_2}  scope=SUITE
 
 Run Code Hotspots Recipe And Kill Sl-Record
   [Documentation]  Starts running the code_hotspots recipe with the workload "sleep 15", then
@@ -204,7 +224,14 @@ The Target Home Dir Is Stored
   [Documentation]  Helper keyword to record the user's home dir on the target.
   ${homeDir} =  Get Home Dir On Target
   ${sanitised} =  Strip String  ${homeDir.stdout}
-  VAR  ${TARGET_HOME_DIR}  ${sanitised}  scope=SUITE
+  VAR  ${TARGET_HOME_DIR} =  ${sanitised}  scope=SUITE
+
+The Reformat On Host Run Is Recorded
+  [Documentation]  Captures the reformat-on-host run ID and checks the host analysis artifacts.
+  ${run_id} =  Extract The Run ID
+  VAR  ${RUN_ID} =  ${run_id}  scope=TEST
+  The Run Exists  ${RUN_ID}
+  The Host Analysis Logs Exist  ${RUN_ID}
 
 Verify No Samples Collected
   [Documentation]  Runs a recipe and verifies that a no samples collected error is returned
@@ -214,3 +241,18 @@ Verify No Samples Collected
   Run Code Hotspots Recipe  --workload "true" --param sampling_freq=low --target ${G_TARGET_NAME}
   The Last Command Failed With Message Code  tool_integrations.neoprof.NO_SAMPLES_COLLECTED
   The Target Output Directory Is Empty
+
+The Host Analysis Logs Exist
+  [Documentation]  Check for the existence of log files that are only created during host reformat
+  [Arguments]  ${run_id}
+  VAR  ${neoprof_dir}  ${G_RUNS_DIR}${/}${run_id}${/}tool${/}neoprof${/}0
+  File Should Exist  ${neoprof_dir}${/}host_analysis_phase1.log
+  File Should Exist  ${neoprof_dir}${/}host_analysis_phase1_stderr.txt
+  File Should Exist  ${neoprof_dir}${/}host_analysis_phase2.log
+  File Should Exist  ${neoprof_dir}${/}host_analysis_phase2_stderr.txt
+
+Run Code Hotspots Recipe With Environment Variables In Workload
+  ${code_hotspots_args} =  Catenate  --workload "bash -c \\"echo \\\\\\"this is \$FOO\\\\\\"\\""
+  ...  --env FOO=bar --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG}
+  ${escaped} =  Escape Dollar If Needed  ${code_hotspots_args}
+  Run Code Hotspots Recipe  ${escaped}

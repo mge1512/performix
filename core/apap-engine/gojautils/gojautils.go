@@ -152,8 +152,8 @@ type AsyncHelper struct {
 	Vm        *goja.Runtime
 	PromiseWG sync.WaitGroup
 	Ctx       context.Context
-	// Source information to support converting stacks back to acurate files and lines.
-	// If we add support for imported files, this should be updated to a source map
+	// Source information for converting the transformed entry source back to its
+	// original filename and line numbers. Frames from other files remain unchanged.
 	SourceFileName string
 	LineOffset     int
 }
@@ -358,24 +358,36 @@ func HelperInjectedLineCount() int {
 	return strings.Count(helperSource, "\n")
 }
 
+// ExecuteFunction invokes a bound JavaScript function with the supplied arguments.
+// It returns JavaScript exceptions unchanged so callers can apply their own error policy.
+func ExecuteFunction(
+	vm *goja.Runtime,
+	exec func(goja.FunctionCall) goja.Value,
+	args []goja.Value,
+	receiver goja.Value,
+) (goja.Value, error) {
+	gojaValue := vm.ToValue(exec)
+	callableFunc, ok := goja.AssertFunction(gojaValue)
+	if !ok {
+		return nil, fmt.Errorf("exec function is not callable")
+	}
+	return callableFunc(receiver, args...)
+}
+
 // ExecuteScriptedFunction calls a goja function, catches and panics and converts
 // them to errors
 func (ah *AsyncHelper) ExecuteScriptedFunction(
 	exec func(goja.FunctionCall) goja.Value,
 	vm *goja.Runtime,
-	jsContext []goja.Value,
+	args []goja.Value,
+	receiver goja.Value,
 ) (out goja.Value, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%v", r)
 		}
 	}()
-	gojaValue := vm.ToValue(exec)
-	callableFunc, ok := goja.AssertFunction(gojaValue)
-	if !ok {
-		return nil, fmt.Errorf("exec function is not callable")
-	}
-	out, err = callableFunc(goja.Undefined(), jsContext...)
+	out, err = ExecuteFunction(vm, exec, args, receiver)
 	if err != nil {
 		if ex, ok := err.(*goja.Exception); ok {
 			err := ah.processGojaError(ex.Value().ToObject(vm))
@@ -389,9 +401,15 @@ func (ah *AsyncHelper) ExecuteScriptedFunction(
 	return out, nil
 }
 
-// CallScriptedFunction runs a bound JS function on the event loop.
-// The function may be asynchronous or synchronous.
+// CallScriptedFunction runs a bound JS function on the event loop and awaits
+// its return value when it is a promise.
 func (ah *AsyncHelper) CallScriptedFunction(stage func(goja.FunctionCall) goja.Value, args []goja.Value) (goja.Value, error) {
+	return ah.CallScriptedFunctionWithReceiver(stage, args, goja.Undefined())
+}
+
+// ExecuteScriptedFunctionOnLoopWithReceiver runs a bound JS function on the
+// event loop without awaiting its return value.
+func (ah *AsyncHelper) ExecuteScriptedFunctionOnLoopWithReceiver(stage func(goja.FunctionCall) goja.Value, args []goja.Value, receiver goja.Value) (goja.Value, error) {
 	type result struct {
 		out goja.Value
 		err error
@@ -399,17 +417,27 @@ func (ah *AsyncHelper) CallScriptedFunction(stage func(goja.FunctionCall) goja.V
 	ch := make(chan result, 1)
 
 	ah.Loop.RunOnLoop(func(vm *goja.Runtime) {
-		out, err := ah.ExecuteScriptedFunction(stage, vm, args)
+		out, err := ah.ExecuteScriptedFunction(stage, vm, args, receiver)
 		ch <- result{out: out, err: err}
-
 	})
 	res := <-ch
 
-	if res.err != nil {
-		return res.out, res.err
-	}
+	return res.out, res.err
+}
 
-	return awaitPromise(ah.Ctx, ah, res.out)
+// CallScriptedFunctionWithReceiver runs a bound JS function on the event loop
+// and awaits its return value when it is a promise.
+func (ah *AsyncHelper) CallScriptedFunctionWithReceiver(stage func(goja.FunctionCall) goja.Value, args []goja.Value, receiver goja.Value) (goja.Value, error) {
+	result, err := ah.ExecuteScriptedFunctionOnLoopWithReceiver(stage, args, receiver)
+	if err != nil {
+		return result, err
+	}
+	return ah.Await(result)
+}
+
+// Await waits for a promise to settle. Non-promise values are returned as-is.
+func (ah *AsyncHelper) Await(promise goja.Value) (goja.Value, error) {
+	return awaitPromise(ah.Ctx, ah, promise)
 }
 
 // Matches JS frames like:
@@ -476,26 +504,27 @@ func (ah *AsyncHelper) parseAndAdjustFrame(line string) (ScriptStackEntry, bool)
 	lineNo, _ := strconv.Atoi(m[3])
 	colNo, _ := strconv.Atoi(m[4])
 
-	// Offset injected lines for accurate source lines.
-	adjustedLine := lineNo - ah.LineOffset
-	if adjustedLine < 1 {
-		adjustedLine = 1
+	if ah.SourceFileName != "" && normalizedJSFileName(fileName) == normalizedJSFileName(ah.SourceFileName) {
+		// Offset injected lines only for the transformed entry source.
+		lineNo -= ah.LineOffset
+		if lineNo < 1 {
+			lineNo = 1
+		}
 	}
 
-	// Prefer configured SourceFileName for display; avoid leaking build paths.
-	src := ah.SourceFileName
-	if src == "" {
-		src = fileName
-	} else {
-		src = path.Base(strings.ReplaceAll(src, `\`, `/`))
-	}
+	// Avoid leaking absolute filesystem build paths.
+	fileName = path.Base(strings.ReplaceAll(fileName, `\`, `/`))
 
 	return ScriptStackEntry{
-		File:     src,
+		File:     fileName,
 		Function: funcName,
-		Line:     adjustedLine,
+		Line:     lineNo,
 		Column:   colNo,
 	}, true
+}
+
+func normalizedJSFileName(fileName string) string {
+	return path.Clean(strings.ReplaceAll(fileName, `\`, `/`))
 }
 
 // ExtractStructuredMessage extracts "code", metadata and "cause" fields from a goja object, if present.

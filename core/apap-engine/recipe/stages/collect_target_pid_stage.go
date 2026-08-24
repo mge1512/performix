@@ -5,12 +5,14 @@ package stages
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/spf13/afero"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
+	"github.com/Arm-Debug/apap-cli/apap-engine/logging/logx"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/perms"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipe"
@@ -30,30 +32,21 @@ var targetPIDOutputs = recipe.CollectorOutput{
 // CollectTargetPIDStage defines a stuct type that's required for collecting
 // information about running processes off the target
 type CollectTargetPIDStage struct {
-	Fs                        afero.Fs
-	OutputPathSupplier        func() string
-	AgentSupplier             recipe.AgentConnSupplier
-	TargetCollectorOutputSink func(util.Named[recipe.CollectorOutput])
+	Fs              afero.Fs
+	AgentSupplier   recipe.AgentConnSupplier
+	ManifestUpdater *run.RunManifestUpdater
 }
 
 func NewCollectTargetPIDStage(
-	outputPathSupplier func() string,
 	agentSupplier recipe.AgentConnSupplier,
-	outputSinks func(o util.Named[recipe.CollectorOutput]),
 	fs afero.Fs,
+	manifestUpdater *run.RunManifestUpdater,
 ) *CollectTargetPIDStage {
-	collectTargetPIDstage := CollectTargetPIDStage{
-		TargetCollectorOutputSink: outputSinks,
-		OutputPathSupplier:        outputPathSupplier,
-		Fs:                        fs,
-		AgentSupplier:             agentSupplier,
+	return &CollectTargetPIDStage{
+		Fs:              fs,
+		AgentSupplier:   agentSupplier,
+		ManifestUpdater: manifestUpdater,
 	}
-	collectTargetPIDstage.TargetCollectorOutputSink(util.Named[recipe.CollectorOutput]{
-		Name:  PIDComponentNamePrefix,
-		Value: targetPIDOutputs,
-	})
-
-	return &collectTargetPIDstage
 }
 
 func (c *CollectTargetPIDStage) Name() string {
@@ -63,15 +56,44 @@ func (c *CollectTargetPIDStage) AlwaysExecute() bool      { return false }
 func (c *CollectTargetPIDStage) ErrorType() run.RunResult { return run.RecipeFailureCollect }
 
 func (c *CollectTargetPIDStage) Execute(ctx *recipe.StageContext) (func(), error) {
+	if c.ManifestUpdater == nil {
+		return nil, message.New(message.CommonUnknownError).WithCause(errors.New("PID collector has no manifest updater"))
+	}
+
 	proc, err := c.AgentSupplier().Client.ListProcesses(ctx.Context, nil)
 	if err != nil {
+		convertedErr := message.FromGRPCStatus(err)
+		if errors.Is(convertedErr, message.New(message.AgentSystemInfoUnsupportedPlatform)) {
+			logx.FromContext(ctx.Context).Info("Target does not support process listing; skipping running-process collection")
+			ctx.CachedAgentProcessListErr = convertedErr
+			return nil, nil
+		}
 		return nil, err
 	}
 
-	//Cache the process list for PID validation in later stages
-	ctx.CachedAgentProcessList = proc
+	relativePath := targetPIDComponentRelativePath()
+	outputPath := c.ManifestUpdater.ComponentPath(relativePath)
+	if err := c.ManifestUpdater.AddPendingComponent(relativePath, targetPIDOutputs.ComponentType); err != nil {
+		return nil, err
+	}
+	if err := c.ManifestUpdater.WriteEntityDirs(); err != nil {
+		return nil, err
+	}
 
-	return nil, WritePIDList(proc, c.Fs, c.OutputPathSupplier())
+	if err := WritePIDList(proc, c.Fs, outputPath); err != nil {
+		return nil, err
+	}
+	if err := c.ManifestUpdater.ClearPending(relativePath); err != nil {
+		return nil, err
+	}
+
+	// Cache the process list for PID validation in later stages.
+	ctx.CachedAgentProcessList = proc
+	return nil, nil
+}
+
+func targetPIDComponentRelativePath() string {
+	return filepath.Join("collector", PIDComponentNamePrefix, targetPIDOutputs.Filename)
 }
 
 type Process struct {

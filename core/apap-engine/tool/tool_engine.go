@@ -6,6 +6,7 @@ package tool
 import (
 	"io"
 
+	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
 	"github.com/Arm-Debug/apap-cli/atperf-agent/process"
 )
 
@@ -13,7 +14,7 @@ import (
 type FileHandle interface {
 	Append(data string) error
 	Close() error
-	Path() string
+	Path() (string, error)
 }
 
 // ProcessHandle wraps a process on the target started
@@ -36,6 +37,7 @@ type Engine interface {
 	ExecCommand(opts *process.LaunchCommand) (*process.CommandResult, error)
 	StartProcess(opts *process.StartProcess) (ProcessHandle, error)
 	CreateTempDir() (string, error)
+	PreserveTempDir(path string) error
 	Mkdir(path string) error
 	Rm(path string, recursive, force bool) error
 	MakeWritable(path string, recursive bool) error
@@ -47,4 +49,5 @@ type Engine interface {
 	StartProgressTracker(id string) error
 	UpdateProgress(id, message string, percent float64) error
 	EndProgress(id string) error
+	GetPlatform() conductor.PlatformConfiguration
 }

@@ -27,6 +27,8 @@ type Metadata struct {
 	Timeout             uint32              `json:"run.timeout"`
 	RunResult           string              `json:"run.result"`
 	RunError            string              `json:"run.error"`
+	SizeBytes           *uint64             `json:"run.size_bytes,omitempty"`
 	TargetName          string              `json:"target.name"`
 	TargetConfig        target.JSONTarget   `json:"target.config"`
+	SupportsStop        *bool               `json:"run.supports_stop,omitempty"`
 }

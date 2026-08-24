@@ -55,6 +55,14 @@
             "Message": "{$PRODUCT_FULL_NAME} cannot process one or more recipe files:"
           }
         },
+        "ready": {
+          "NO_WORKLOAD_SPECIFIED": {
+            "Severity": "Error",
+            "Message": "You did not specify a workload type.",
+            "Explanation": "The `recipe ready` command requires you to specify the type of workload to check using one of these flags: `--pid`, `--workload`, or `--system-wide`. You did not provide any of these flags.",
+            "Advice": "Run `recipe ready --help` to learn more about each flag. Provide one workload flag to continue."
+          }
+        },
         "run": {
           "NO_WORKLOAD_SPECIFIED": {
             "Severity": "Error",
@@ -243,6 +251,12 @@
           "Explanation": "The target configuration uses password authentication, which is incompatible with the `{flag}` flag.",
           "Advice": "Remove `{flag}` to use password authentication, or switch to key authentication. Run the command with `--help` for further information."
         },
+        "PROVISION_KEY_WITH_JUMPS": {
+          "Severity": "Error",
+          "Message": "SSH key provisioning does not support jump nodes.",
+          "Explanation": "The target configuration includes one or more jump nodes, but the `--provision-key` flag can provision a key only on a directly reachable SSH target.",
+          "Advice": "Remove the jump nodes, or remove `--provision-key` and configure each node in the SSH chain to use key or password authentication."
+        },
         "MUTUALLY_EXCLUSIVE_FLAGS": {
           "Severity": "Error",
           "Message": "You cannot use `{flag1}` and `{flag2}` together.",
@@ -276,6 +290,12 @@
           "Message": "The server and auth ports must be different.",
           "Explanation": "Both `--server-port` and `--auth-port` were set to the same value. Each service must run on a different port.",
           "Advice": "Choose distinct port numbers for the main service and the auth service."
+        },
+        "stop": {
+          "NO_RESPONSIVE_DAEMON": {
+            "Severity": "Info",
+            "Message": "No responsive {$PRODUCT_FULL_NAME} daemon was found at `{serverAddress}`."
+          }
         }
       }
     },
@@ -408,7 +428,7 @@
         "CANNOT_START_NEW_SERVER": {
           "Severity": "Error",
           "Message": "{$PRODUCT_FULL_NAME} cannot start a new server.",
-          "Explanation": "{$PRODUCT_FULL_NAME} cannot start a new server. This might be because a server is already running.",
+          "Explanation": "{$PRODUCT_FULL_NAME} cannot start a new server. This might be because a server is already running on the specified hostname and port, or because the specified hostname and port are invalid.",
           "Advice": "Run `daemon stop` to stop any existing server, then retry the operation. If {$PRODUCT_FULL_NAME} still cannot start a new server, contact Arm support."
         }
       }
@@ -531,6 +551,12 @@
         "Message": "{$PRODUCT_FULL_NAME} could not elevate privileges using passwordless sudo.",
         "Explanation": "Privilege elevation using passwordless sudo failed on the target.",
         "Advice": "Check that passwordless sudo is correctly configured on the target. If the issue continues, contact Arm support."
+      },
+      "MECHANISM_ANDROID_SU_NOT_IMPLEMENTED": {
+        "Severity": "Error",
+        "Message": "Android root access is not implemented.",
+        "Explanation": "{$PRODUCT_FULL_NAME} cannot yet use Android su to run commands with root privileges.",
+        "Advice": "Use a recipe and workload type that does not require root privileges."
       }
     },
     "api": {
@@ -655,32 +681,38 @@
       "connection_creator": {
         "INSUFFICIENT_PRIVILEGES": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} could not start the agent server on the target.",
-          "Explanation": "The agent server must run with administrator or root privileges, but privilege elevation was not allowed on the target.",
-          "Advice": "See the 'Prepare your target for {$PRODUCT_FULL_NAME} connections' section of the {$PRODUCT_FULL_NAME} User Guide for more information. Check that privilege elevation (for example, sudo) is configured correctly on the target. If {$PRODUCT_FULL_NAME} still cannot start the agent server, contact Arm support."
+          "Message": "{$PRODUCT_FULL_NAME} could not start the agent server on the {locality}.",
+          "Explanation": "The agent server must run with administrator or root privileges, but privilege elevation is not allowed on the {locality}.",
+          "Advice": "Check that privilege elevation, such as `sudo`, is configured correctly on the {locality}. For more information, see 'Prepare your target for {$PRODUCT_FULL_NAME} connections' in the {$PRODUCT_FULL_NAME} User Guide. If {$PRODUCT_FULL_NAME} still cannot start the agent server, contact Arm support."
         },
         "AGENT_NOT_DEPLOYED": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot locate the launch script for the agent server on the target.",
-          "Explanation": "This operation needs the agent server to be running. {$PRODUCT_FULL_NAME} tried to run the `{cmd}` script in `{workingDir}`, but the script was missing. The {$PRODUCT_FULL_NAME} tools might be missing from the target or they might have been manually modified.",
+          "Message": "{$PRODUCT_FULL_NAME} could not find the launch script for the agent server on the target.",
+          "Explanation": "This operation requires a running agent server. {$PRODUCT_FULL_NAME} tried to run `{cmd}` in `{workingDir}`, but the script was missing. The {$PRODUCT_FULL_NAME} tools might be missing from the target or they might have been manually modified.",
           "Advice": "Run `target prepare` to deploy the agent. If {$PRODUCT_FULL_NAME} still cannot launch the agent server, contact Arm support."
+        },
+        "HOST_AGENT_NOT_DEPLOYED": {
+          "Severity": "Error",
+          "Message": "{$PRODUCT_FULL_NAME} could not locate the launch script for the agent server on the host.",
+          "Explanation": "This operation requires a running agent server. {$PRODUCT_FULL_NAME} tried to run `{cmd}` in `{workingDir}`, but the script was missing. The {$PRODUCT_FULL_NAME} tools might be missing from the host or they might have been manually modified.",
+          "Advice": "Run a recipe that deploys host-side tools with `--deploy-tools` to deploy the host agent. If {$PRODUCT_FULL_NAME} still cannot launch the agent server, contact Arm support."
         },
         "LAUNCH_ERROR_CODE": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot launch the agent server on the target.",
-          "Explanation": "This operation needs the agent server to be running. {$PRODUCT_FULL_NAME} tried to run the `{cmd}` script in `{workingDir}`, but it returned exit code `{exitCode}`. Possible causes include resource limits such as a lack of memory or file descriptors, an internal script error, or manual changes to the {$PRODUCT_FULL_NAME} tools directory.",
-          "Advice": "Check the target has sufficient resources to run the agent server. Ensure the {$PRODUCT_FULL_NAME} tools directory has not been manually modified. If {$PRODUCT_FULL_NAME} still cannot launch the agent server, contact Arm support."
+          "Message": "{$PRODUCT_FULL_NAME} could not launch the agent server on the {locality}.",
+          "Explanation": "This operation requires a running agent server. {$PRODUCT_FULL_NAME} tried to run `{cmd}` in `{workingDir}`, but it returned exit code `{exitCode}`. Possible causes include resource limits such insufficient memory or file descriptors, an internal script error, or manual changes to the {$PRODUCT_FULL_NAME} tools directory.",
+          "Advice": "Check the {locality} has sufficient resources to run the agent server. Ensure the {$PRODUCT_FULL_NAME} tools directory has not been manually modified. If {$PRODUCT_FULL_NAME} still cannot launch the agent server, contact Arm support."
         },
         "RUN_LAUNCH_COMMAND": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot launch the agent server on the target.",
-          "Explanation": "This operation needs the agent server to be running. {$PRODUCT_FULL_NAME} tried to run the `{cmd}` script in `{workingDir}`, but an error occurred while trying to execute this command. Possible causes include the script not being executable, resource limits such as a lack of memory or file descriptors, a broken connection to the target, or manual changes to the {$PRODUCT_FULL_NAME} tools directory.",
-          "Advice": "Ensure that the '{cmd}' script exists and is executable. Check that the target has sufficient resources to run the agent server. Ensure that the {$PRODUCT_FULL_NAME} tools directory has not been manually modified. If {$PRODUCT_FULL_NAME} still cannot launch the agent server, contact Arm support."
+          "Message": "{$PRODUCT_FULL_NAME} could not launch the agent server on the {locality}.",
+          "Explanation": "This operation requires a running agent server. {$PRODUCT_FULL_NAME} tried to run `{cmd}` in `{workingDir}`, but an error occurred. Possible causes include the script not being executable, resource limits such as insufficient memory or file descriptors, a broken connection to the {locality}, or manual changes to the {$PRODUCT_FULL_NAME} tools directory.",
+          "Advice": "Ensure that the '{cmd}' script exists and is executable. Check that the {locality} has sufficient resources to run the agent server. Ensure that the {$PRODUCT_FULL_NAME} tools directory has not been manually modified. If {$PRODUCT_FULL_NAME} still cannot launch the agent server, contact Arm support."
         },
         "NEW_AGENT_CONNECTION": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot connect to the agent server on the target.",
-          "Explanation": "This operation needs the {$PRODUCT_FULL_NAME} agent server to be running on the target. {$PRODUCT_FULL_NAME} launched a new agent, but could not connect to it. The agent might have shut down or there might be a connection issue.",
+          "Message": "{$PRODUCT_FULL_NAME} could not connect to the agent server on the {locality}.",
+          "Explanation": "This operation needs a running {$PRODUCT_FULL_NAME} agent server on the {locality}. {$PRODUCT_FULL_NAME} launched a new agent but could not connect to it. The agent might have shut down or there might be a connection issue.",
           "Advice": "Try the operation again. Check that the agent server is listening on port `{portNum}`. If {$PRODUCT_FULL_NAME} still cannot connect to the agent server, contact Arm support."
         }
       },
@@ -936,17 +968,13 @@
         "Explanation": "The OS and architecture combination ({os} {arch}) does not provide the host-side functionality required for this operation.",
         "Advice": "If the issue continues, contact Arm support."
       },
-      "USER_CANCELLATION_ERROR": {
-        "Severity": "Error",
-        "Message": "You canceled the operation.",
-        "Explanation": "{$PRODUCT_FULL_NAME} stopped the operation after receiving a cancellation request.",
-        "Advice": "If this occurred unexpectedly, contact Arm support."
+      "USER_CANCELED": {
+        "Severity": "Info",
+        "Message": "The operation was canceled."
       },
-      "USER_STOPPED_ERROR": {
-        "Severity": "Error",
-        "Message": "The operation stopped.",
-        "Explanation": "You manually stopped the operation.",
-        "Advice": "If this occurred unexpectedly, contact Arm support."
+      "USER_STOPPED": {
+        "Severity": "Info",
+        "Message": "The operation was stopped."
       }
     },
     "conductor": {
@@ -990,38 +1018,6 @@
           "Message": "{$PRODUCT_FULL_NAME} cannot identify a shell to run the workload through.",
           "Explanation": "The `--use-shell` flag requires a shell on the target to run the workload through. {$PRODUCT_FULL_NAME} tried to use the shell specified by the `{envVar}` environment variable, but this is not set or is empty. The fallback shell `{fallback}` also does not exist or failed to execute.",
           "Advice": "Check that the `{envVar}` environment variable is set when connecting to the target manually using SSH. Alternatively, verify that the fallback shell `{fallback}` is usable. If {$PRODUCT_FULL_NAME} still cannot run the workload through a shell, contact Arm support."
-        }
-      },
-      "sl_collect": {
-        "CONNECTION_FAILED": {
-          "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot connect to the daemon on the target.",
-          "Explanation": "{$PRODUCT_FULL_NAME} cannot connect to the target daemon, which manages communication with the target, collects information, and performs profiling.",
-          "Advice": "Run `target prepare` to deploy the daemon on the target, and check that it is running before you retry the operation. If {$PRODUCT_FULL_NAME} still cannot connect, contact Arm support."
-        },
-        "NO_SUDO": {
-          "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot launch the target daemon because it lacks the required privileges.",
-          "Explanation": "To communicate with the target, run profiling, and collect data, the {$PRODUCT_FULL_NAME} target daemon must run with passwordless superuser privileges. {$PRODUCT_FULL_NAME} cannot elevate privileges with passwordless sudo, so it cannot launch the daemon.",
-          "Advice": "Ensure that your user account is configured with passwordless sudo on the target. If {$PRODUCT_FULL_NAME} still cannot launch the daemon on the target, contact Arm support."
-        },
-        "NOT_DEPLOYED": {
-          "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot launch the daemon on the target system.",
-          "Explanation": "The daemon enables communication with the target, data collection, and profiling. {$PRODUCT_FULL_NAME} cannot launch the daemon because it is not deployed or is not executable.",
-          "Advice": "Run `target prepare` to deploy the daemon, and then run the command again. If {$PRODUCT_FULL_NAME} still cannot launch the daemon, contact Arm support."
-        },
-        "NOT_RUNNING": {
-          "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot connect to the daemon on the target.",
-          "Explanation": "The daemon enables communication with the target, data collection, and profiling. {$PRODUCT_FULL_NAME} cannot connect to the target daemon because it is not running.",
-          "Advice": "Run `target prepare` to deploy the daemon. Then, use a command such as `target info` to start it. If the connection still fails, contact Arm support."
-        },
-        "LAUNCH_FAIL": {
-          "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot launch the daemon on the target.",
-          "Explanation": "The {$PRODUCT_FULL_NAME} target daemon must be running to enable communication with the target, data collection, and profiling. The daemon is deployed on the target, but an error occurred when {$PRODUCT_FULL_NAME} attempted to launch it.",
-          "Advice": "If the issue continues, contact Arm support."
         }
       },
       "ssh": {
@@ -1586,6 +1582,12 @@
       }
     },
     "recipe": {
+      "EXPERIMENTAL_DISABLED": {
+        "Severity": "Error",
+        "Message": "The Run could not be loaded because it was generated with an experimental recipe that is not currently enabled.",
+        "Explanation": "The Run was generated using the experimental `{recipe}` recipe, but experimental recipes are currently disabled.",
+        "Advice": "Enable experimental recipes and restart {$PRODUCT_FULL_NAME}, then open the Run again."
+      },
       "DOES_NOT_EXIST": {
         "Severity": "Error",
         "Message": "The `{recipe}` recipe does not exist or is invalid.",
@@ -1653,6 +1655,12 @@
         "Advice": "Specify a valid workload type and then try again."
       },
       "stages": {
+        "HOST_AGENT_CONNECTION_FAILED": {
+          "Severity": "Error",
+          "Message": "{$PRODUCT_FULL_NAME} cannot connect to the agent server on the host.",
+          "Explanation": "The recipe needs the agent server on the host to run host-side tools, but the connection could not be established.",
+          "Advice": "Try the operation again. Ensure the host has sufficient resources and that the {$PRODUCT_FULL_NAME} tools directory on the host has not been manually modified. If {$PRODUCT_FULL_NAME} still cannot connect to the agent server on the host, contact Arm support."
+        },
         "SCRIPTED_STAGE_ERROR": {
           "Severity": "Error",
           "Message": "The recipe failed during the `{stage}` stage.",
@@ -1868,6 +1876,18 @@
           "Message": "The configuration for the `{type}` renderer (id: `{id}`) is invalid.",
           "Explanation": "The provided renderer configuration contains a dependency cycle: {cycle}. Each renderer in this cycle depends on an output of the previous one, so no valid evaluation order exists.",
           "Advice": "Ensure that the specified renderer configuration does not contain any cycles."
+        },
+        "RENDERER_DEPENDENCY_FAILED": {
+          "Severity": "Error",
+          "Message": "The `{type}` renderer (id: `{id}`) could not run because a required renderer failed.",
+          "Explanation": "The `{type}` renderer depends on the `{dependencyType}` renderer (id: `{dependencyId}`), but that renderer failed or could not be created.",
+          "Advice": "Check the error reported for the `{dependencyType}` renderer, then retry rendering after resolving that problem."
+        },
+        "RENDERER_DEPENDENCY_NOT_INITIALIZED": {
+          "Severity": "Error",
+          "Message": "The `{type}` renderer (id: `{id}`) could not run because a required renderer has not run.",
+          "Explanation": "The `{type}` renderer depends on the `{dependencyType}` renderer (id: `{dependencyId}`), but that renderer is declared later in the renderer list and has not been initialized.",
+          "Advice": "Declare the `{dependencyType}` renderer before the `{type}` renderer, then retry rendering."
         }
       },
       "sql_renderer": {
@@ -2136,8 +2156,8 @@
       },
       "UPDATE_METADATA": {
         "Severity": "Error",
-        "Message": "{$PRODUCT_FULL_NAME} cannot rename the run with ID `{runID}`.",
-        "Explanation": "{$PRODUCT_FULL_NAME} cannot rename the run with ID `{runID}` because the metadata file at `{path}` cannot be updated. Possible causes include incorrect permissions or a problem with the file system.",
+        "Message": "{$PRODUCT_FULL_NAME} cannot update the run with ID `{runID}`.",
+        "Explanation": "{$PRODUCT_FULL_NAME} cannot update the run with ID `{runID}` because the metadata file at `{path}` cannot be updated. Possible causes include incorrect permissions or a problem with the file system.",
         "Advice": "Ensure that you have permission to write to the metadata file at `{path}`. If {$PRODUCT_FULL_NAME} still cannot update the run metadata, contact Arm support."
       },
       "UPDATE_SOURCE_CODE_PATHS": {
@@ -2380,7 +2400,7 @@
         "Severity": "Error",
         "Message": "The `locality` field can only be used on `tool_bundle` dependencies.",
         "Explanation": "A recipe or tool integration sets `locality` on a `tool` dependency. {$PRODUCT_FULL_NAME} only supports `locality` for `tool_bundle` dependencies.",
-        "Advice":  "Contact support or the tool integration author."
+        "Advice": "Contact support or the tool integration author."
       },
       "TOOL_BUNDLE_MISSING_FIELDS": {
         "Severity": "Error",
@@ -2390,6 +2410,34 @@
       }
     },
     "tool": {
+      "copy_from": {
+        "UNSUPPORTED_SOURCE_LOCALITY": {
+          "Severity": "Error",
+          "Message": "Copying files from source locality `{sourceLocality}` is not supported.",
+          "Explanation": "A tool integration requested a file copy from `{sourceLocality}` to `{destinationLocality}`, but {$PRODUCT_FULL_NAME} currently supports copying files only from `target` to `host`.",
+          "Advice": "Contact support or the tool integration author."
+        },
+        "UNSUPPORTED_DESTINATION_LOCALITY": {
+          "Severity": "Error",
+          "Message": "Copying files is not supported for the destination locality `{destinationLocality}`.",
+          "Explanation": "A tool integration requested a file copy from `{sourceLocality}` to `{destinationLocality}`, but {$PRODUCT_FULL_NAME} currently supports copying files only from `target` to `host`.",
+          "Advice": "Contact support or the tool integration author."
+        },
+        "TRANSFER_MANAGER_DISABLED": {
+          "Severity": "Error",
+          "Message": "File copy from the target to the host is not available.",
+          "Explanation": "A tool integration requested a file copy from `target` to `host`, but this file copy support is disabled in the current run.",
+          "Advice": "Set the `APXD_ENABLE_TRANSFER_MANAGER` environment variable and restart the engine daemon, then try again. If the issue continues, contact Arm support."
+        }
+      },
+      "locality": {
+        "UNSUPPORTED": {
+          "Severity": "Error",
+          "Message": "The engine locality `{locality}` is not supported.",
+          "Explanation": "A tool integration requested the {locality} engine locality, but {$PRODUCT_FULL_NAME} supports only `target` and `host` localities for this run.",
+          "Advice": "Specify one of `target` or `host` as the locality. If the issue continues, contact Arm support."
+        }
+      },
       "deployer": {
         "REMOVE_EXISTING_TOOL": {
           "Severity": "Error",
@@ -2443,32 +2491,32 @@
       "target_path": {
         "WIN_LOCALAPPDATA_UNAVAILABLE": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot deploy tools to the target because the tool deployment directory could not be resolved.",
-          "Explanation": "{$PRODUCT_FULL_NAME} must resolve the tool deployment directory in order to install tools on the target. {$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but %LOCALAPPDATA is either unavailable or not writable.",
-          "Advice": "Ensure %LOCALAPPDATA is available with write permissions. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable. Then retry the operation. If the issue persists, contact Arm support."
+          "Message": "{$PRODUCT_FULL_NAME} could not deploy tools to the {locality} because it could not resolve the tool deployment directory.",
+          "Explanation": "{$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but %LOCALAPPDATA is either unavailable or not writable.",
+          "Advice": "Ensure %LOCALAPPDATA is available with write permissions. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable., then retry the operation. If the issue persists, contact Arm support."
         },
         "TARGET_HOME_UNAVAILABLE": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot deploy tools to the target because the tool deployment directory could not be resolved.",
-          "Explanation": "{$PRODUCT_FULL_NAME} must resolve the tool deployment directory in order to install tools on the target. {$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but could not determine the target user's home directory.",
-          "Advice": "Ensure $HOME is set and accessible on the target. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable. Then retry the operation. If the issue persists, contact Arm support."
+          "Message": "{$PRODUCT_FULL_NAME} could not deploy tools to the {locality} because it could not resolve the tool deployment directory.",
+          "Explanation": "{$PRODUCT_FULL_NAME} must resolve the tool deployment directory in order to install tools on the {locality}. {$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but could not determine the {locality} user's home directory.",
+          "Advice": "Ensure $HOME is set and accessible on the {locality}. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable., then retry the operation. If the issue persists, contact Arm support."
         },
         "NO_WRITABLE_TOOLS_PATH": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot deploy tools to the target because the tool deployment directory could not be resolved.",
-          "Explanation": "{$PRODUCT_FULL_NAME} must resolve the tool deployment directory in order to install tools on the target. {$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but the resolved path is not writable",
-          "Advice": "Ensure `{path}` is writable on the target. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable to a writable location. Then retry the operation. If the issue persists, contact Arm support."
+          "Message": "{$PRODUCT_FULL_NAME} cannot deploy tools to the {locality} because the tool deployment directory could not be resolved.",
+          "Explanation": "{$PRODUCT_FULL_NAME} must resolve the tool deployment directory in order to install tools on the {locality}. {$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but the resolved path is not writable",
+          "Advice": "Ensure `{path}` is writable on the {locality}. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable to a writable location. Then retry the operation. If the issue persists, contact Arm support."
         },
         "DIR_MISSING": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot deploy tools to the target because the tool deployment directory could not be resolved.",
-          "Explanation": "{$PRODUCT_FULL_NAME} must resolve the tool deployment directory in order to install tools on the target. {$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but the resolved path does not exist.",
-          "Advice": "Create `{path}` on the target and ensure it is writable. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable to an existing writable location. Then retry the operation. If the issue persists, contact Arm support."
+          "Message": "{$PRODUCT_FULL_NAME} could not deploy tools to the {locality} because it could not resolve the tool deployment directory.",
+          "Explanation": "{$PRODUCT_FULL_NAME} tried to resolve the tool deployment directory but the resolved path does not exist.",
+          "Advice": "Create `{path}` on the {locality} and ensure it is writable. Alternatively, configure the tool deployment directory by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable to an existing writable location, then retry the operation. If the issue persists, contact Arm support."
         },
         "LOCK_DIR_CONFLICT": {
           "Severity": "Error",
-          "Message": "{$PRODUCT_FULL_NAME} cannot use the requested tools directory because it conflicts with the agent lock directory.",
-          "Explanation": "{$PRODUCT_FULL_NAME} resolved the tools directory on the target to `{path}`, but that path is reserved for the agent lock and cannot be made private to the current user for tool deployment.",
+          "Message": "{$PRODUCT_FULL_NAME} could not use the requested tools directory because it is reserved for the agent lock.",
+          "Explanation": "{$PRODUCT_FULL_NAME} resolved the tools directory on the {locality} to `{path}`, but that path is reserved for the agent lock and cannot be made private to the current user for tool deployment.",
           "Advice": "Choose a different tools path by setting the APXD_DEPLOYMENT_TOOLS_DIR environment variable to a user-specific location that can be owned by the current user, then retry the operation. If the issue persists, contact Arm support."
         }
       },
@@ -2477,7 +2525,7 @@
           "Severity": "Error",
           "Message": "{$PRODUCT_FULL_NAME} could not elevate privileges on the target.",
           "Explanation": "{$PRODUCT_FULL_NAME} attempted to run `{request}` with administrator or root privileges on the target, but the request was not permitted.",
-          "Advice": "See the 'Prepare your target for {$PRODUCT_FULL_NAME} connections' section of the {$PRODUCT_FULL_NAME} User Guide for more information. Check that privilege elevation (for example, sudo) is configured correctly on the target. If {$PRODUCT_FULL_NAME} still cannot elevate privileges, contact Arm support."
+          "Advice": "See the 'Prepare your target for {$PRODUCT_FULL_NAME} connections' section of the {$PRODUCT_FULL_NAME} User Guide for more information. Check that privilege elevation is configured correctly. If {$PRODUCT_FULL_NAME} still cannot elevate privileges, contact Arm support."
         }
       }
     }
@@ -2509,7 +2557,35 @@
     }
   },
   "recipes": {
+    "code_hotspots": {
+      "TELEMETRY_SPECIFICATION_UNAVAILABLE": {
+        "Severity": "Warning",
+        "Message": "Some Code Hotspots measurement details will be unavailable.",
+        "Explanation": "No compatible telemetry specification is available for the primary CPU, `{cpuName}`. The run can still be collected and rendered, but some measurement descriptions and grouping information will not be available.",
+        "Advice": "You can continue with the recipe. To include complete measurement details, use a target whose primary CPU has a compatible telemetry specification."
+      }
+    },
+    "cpu_microarchitecture": {
+      "SOFT_LOCKUP_RISK": {
+        "Severity": "Warning",
+        "Message": "The collection might make the target unresponsive.",
+        "Explanation": "This target has a high number of CPU cores and uses the kernel's no forced preemption mode. On systems with this configuration, collecting many metrics while profiling a highly parallel launch mode workload has been observed to cause CPU soft lockups or make the target temporarily unresponsive. If this happens, {$PRODUCT_FULL_NAME} may lose communication with the target agent and the collection may fail.",
+        "Advice": "If the collection fails because communication with the target is lost, consider using system-wide collection mode. Alternatively, consider one or more of the following: reduce the number of selected metric groups, reduce the workload’s parallelism, or configure the kernel to run in voluntary or full preemption mode."
+      },
+      "TELEMETRY_SPECIFICATION_UNAVAILABLE": {
+        "Severity": "Error",
+        "Message": "{$PRODUCT_FULL_NAME} cannot collect CPU Microarchitecture data.",
+        "Explanation": "The CPU Microarchitecture recipe requires a telemetry specification for the primary CPU, `{cpuName}`, to determine which metric groups to collect, but no compatible specification is available.",
+        "Advice": "Use a target whose primary CPU is supported by the CPU Microarchitecture recipe."
+      }
+    },
     "instruction_mix": {
+      "TELEMETRY_SPECIFICATION_UNAVAILABLE": {
+        "Severity": "Warning",
+        "Message": "Some Instruction Mix measurement details will be unavailable.",
+        "Explanation": "No compatible telemetry specification is available for the primary CPU, `{cpuName}`. Dynamic Instruction Mix data can still be collected and rendered, but some measurement descriptions and grouping information will not be available.",
+        "Advice": "You can continue with the recipe. To include complete measurement details, use a target whose primary CPU has a compatible telemetry specification."
+      },
       "NO_WORKLOAD_STATIC": {
         "Severity": "Error",
         "Message": "{$PRODUCT_FULL_NAME} cannot run instruction mix in static analysis mode with the workload type `{workloadType}`.",
@@ -2576,6 +2652,24 @@
         "Explanation": "The workload `{workload}` is not executable on the target. This could be because `{executable}` is not owned by the current user, does not have the correct permissions, is a script missing the shebang (`#!`), or is not a file.",
         "Advice": "Check that `{executable}` is a file and that you have permission to run it on the target. If the workload is a script, ensure that the shebang (`#!`) has been included and that the script is executable."
       },
+      "UNSUPPORTED_WORKLOAD_TYPE": {
+        "Severity": "Error",
+        "Message": "The workload type `{workloadType}` is not supported.",
+        "Explanation": "The tool integration supports launched workloads, attaching to an existing process, and system-wide collection.",
+        "Advice": "Run the Recipe with a workload, attach it to an existing process, or select system-wide collection."
+      },
+      "INVALID_LAUNCH_WORKLOAD": {
+        "Severity": "Error",
+        "Message": "The workload command is empty.",
+        "Explanation": "The tool integration cannot start collection because no workload command was provided.",
+        "Advice": "Provide a workload command and run the Recipe again."
+      },
+      "INVALID_ATTACH_WORKLOAD": {
+        "Severity": "Error",
+        "Message": "The process ID `{pid}` is invalid.",
+        "Explanation": "The tool integration requires a positive process ID when attaching to an existing process.",
+        "Advice": "Provide the process ID of a running process and run the Recipe again."
+      },
       "WORKLOAD_START_FAILED": {
         "Severity": "Error",
         "Message": "{$PRODUCT_FULL_NAME} could not start the workload on the target.",
@@ -2612,6 +2706,12 @@
         "Explanation": "The specified third-party recipe invokes the `{tool}` tool. The recipe supplied invalid arguments to the tool, which caused the tool to fail.",
         "Advice": "If the issue continues, contact the recipe author. If you are the recipe author, run the `{cmd}` command to see usage information for the tool."
       },
+      "INSUFFICIENT_SAMPLES": {
+        "Severity": "Error",
+        "Message": "Not enough samples were collected for {tool}.",
+        "Explanation": "{tool} requires at least {minimumSamples} complete samples. A sampling interval of {interval} seconds requires at least {minimumDuration} seconds of collection time.",
+        "Advice": "Increase the Run duration to at least {minimumDuration} seconds or select a shorter sampling interval, then run the Recipe again."
+      },
       "CREATE_PYTHON_VENV": {
         "Severity": "Error",
         "Message": "{$PRODUCT_FULL_NAME} cannot create a Python virtual environment (venv) for the `{tool}` tool.",
@@ -2636,6 +2736,12 @@
         "Explanation": "The tool integration needs to know the login name used on the target, but determining the login name failed. The `logname` exited with code `{lognameRc}` and the `env` exited with code `{envRc}`.",
         "Advice": "Ensure the connection to the target has a valid login user and that the commands `logname` or `env` can report it. If the issue continues, contact Arm support."
       },
+      "GET_PRIMARY_GROUP_FAILED": {
+        "Severity": "Error",
+        "Message": "Failed to find the primary group of `{username}` on the target.",
+        "Explanation": "The tool integration needs to know the primary group of the user `{username}` on the target, but the command `{cmd}` failed with exit code `{exitCode}`.",
+        "Advice": "Ensure that the user `{username}` has a valid primary group on the target and that the `id` command can report it. If the issue continues, contact Arm support."
+      },
       "PRIVILEGE_CHECK_FAILED_PERF_PARANOID": {
         "Severity": "Error",
         "Message": "Failed to check privilege requirements for the `{tool}` tool on the target.",
@@ -2656,6 +2762,18 @@
       }
     },
     "asct": {
+      "BUILD_PREREQUISITES_MISSING": {
+        "Severity": "Error",
+        "Message": "ASCT cannot be installed because required build tools are unavailable.",
+        "Explanation": "ASCT builds native benchmarks while it is installed on the Target, but one or more build requirements are missing or incompatible: {details}",
+        "Advice": "Install GNU Make at `/usr/bin/make`, GCC version 8 or later as `gcc`, and a C compiler as `cc`, then run the Recipe again."
+      },
+      "RUNTIME_PREREQUISITE_MISSING": {
+        "Severity": "Error",
+        "Message": "ASCT cannot run because a required tool is unavailable on the Target.",
+        "Explanation": "ASCT requires additional system tools while collecting data, but a runtime requirement is unavailable: {details}",
+        "Advice": "Install `numactl` on the Target, then run the Recipe again."
+      },
       "RUN_FAILED": {
         "Severity": "Error",
         "Message": "The `asct` tool failed while collecting data.",
@@ -2664,11 +2782,23 @@
       }
     },
     "sysutil_timeline": {
+      "INVALID_INTERVAL": {
+        "Severity": "Error",
+        "Message": "The System Utilization sampling interval is invalid.",
+        "Explanation": "The sampling interval `{value}` seconds is outside the supported range of `{min}` to `{max}` seconds.",
+        "Advice": "Set the sampling interval to a value between `{min}` and `{max}` seconds, then run the Recipe again."
+      },
       "NUMASTAT_NOT_FOUND": {
         "Severity": "Warning",
         "Message": "`numastat` is not installed on the target.",
         "Explanation": "The System Utilization recipe can collect NUMA statistics when the `numastat` program is installed on the target. The recipe can still run without this program, but NUMA statistics will be unavailable in the timeline output.",
         "Advice": "Install the package that provides `numastat` on the target if NUMA statistics are required in the timeline output."
+      },
+      "RUN_FAILED": {
+        "Severity": "Error",
+        "Message": "System Utilization collection failed.",
+        "Explanation": "The System Utilization collector stopped unexpectedly before it could produce a valid timeline.",
+        "Advice": "Check the Run log for collector errors and address the underlying issue, then run the Recipe again. If the issue continues, contact Arm support."
       }
     },
     "syscall_trace": {
@@ -2707,6 +2837,44 @@
         "Message": "The `syscall-trace` tool failed while collecting data.",
         "Explanation": "The specified recipe invokes the `syscall-trace` tool. This tool failed while running `strace` or parsing the collected trace data: {detail}.",
         "Advice": "Check the syscall trace stdout, stderr, and raw trace log artifacts for more details. If the issue continues, contact Arm support."
+      }
+    },
+    "jitdump_jvm": {
+      "ATTACH_PID_NOT_JVM": {
+        "Severity": "Error",
+        "Message": "The process with PID `{pid}` is not a detectable JVM process.",
+        "Explanation": "Java Analysis can attach only to a running JVM process, but PID `{pid}` did not expose JVM runtime data on the target.",
+        "Advice": "Check that PID `{pid}` belongs to a running Java process owned by an accessible user, then check the Recipe readiness again."
+      },
+      "JVM_AGENT_START_FAILED": {
+        "Severity": "Error",
+        "Message": "The `jitdump-jvm` JVM agent could not be started.",
+        "Explanation": "{$PRODUCT_FULL_NAME} could not start the `jitdump-jvm` JVM agent on the target.",
+        "Advice": "Check the target and Run logs for the underlying error, then run the Recipe again."
+      },
+      "JVM_AGENT_WAIT_FAILED": {
+        "Severity": "Error",
+        "Message": "The `jitdump-jvm` JVM agent could not be monitored.",
+        "Explanation": "{$PRODUCT_FULL_NAME} encountered an unexpected error while waiting for the `jitdump-jvm` JVM agent to finish.",
+        "Advice": "Check whether the JVM agent is still running on the target. Stop it if necessary, then run the Recipe again."
+      },
+      "JVM_AGENT_EXITED": {
+        "Severity": "Error",
+        "Message": "Java Flight Recorder collection stopped unexpectedly.",
+        "Explanation": "The `jitdump-jvm` JVM agent exited with code `{exitCode}` before the workload or collection period finished.",
+        "Advice": "Check the Run log and target configuration for the underlying error, then run the Recipe again."
+      },
+      "JFR_REFORMAT_FAILED": {
+        "Severity": "Error",
+        "Message": "The `jitdump-jvm` tool failed to reformat the collected Java Flight Recorder data.",
+        "Explanation": "The `jitdump-jvm` tool failed while reformatting the collected Java Flight Recorder data into a format that can be read by {$PRODUCT_FULL_NAME}.",
+        "Advice": "Check the tool logs for the underlying error, then run the Recipe again. If the issue continues, contact Arm support."
+      },
+      "JFR_REFORMAT_COMPONENTS_MISSING": {
+        "Severity": "Error",
+        "Message": "The Java Flight Recorder conversion did not produce all required data components.",
+        "Explanation": "The following data components are missing: {missingComponents}.",
+        "Advice": "Check the tool logs for the underlying error, then run the Recipe again. If the issue continues, contact Arm support."
       }
     },
     "instruction_mix": {
@@ -2763,6 +2931,18 @@
         "Message": "The `instruction_mix` tool failed due to an unexpected error.",
         "Explanation": "The specified recipe invokes the `instruction_mix` tool. This tool encountered an unexpected error while analyzing the workload on the target.",
         "Advice": "If the issue continues, contact Arm support."
+      },
+      "UNSUPPORTED_FILE_FORMAT": {
+        "Severity": "Error",
+        "Message": "The workload uses an unsupported format.",
+        "Explanation": "Static analysis requires a workload executable that can be disassembled by `objdump`, typically an ELF binary. Executable scripts are not supported.",
+        "Advice": "Run the Instruction Mix recipe again and specify `--param mode=dynamic` to only run in dynamic analysis mode, or specify a different workload."
+      },
+      "WORKLOAD_VALIDATION_FAILED": {
+        "Severity": "Warning",
+        "Message": "Failed to validate the workload. The run may not succeed.",
+        "Explanation": "`objdump` returned code {rc} when reading the workload executable. Static analysis requires a workload executable that can be disassembled by `objdump`, typically an ELF binary. Executable scripts are not supported.",
+        "Advice": "Check that `objdump` can read the workload executable. Check the run logs for `objdump` error messages. Alternatively, run the Instruction Mix recipe again and specify `--param mode=dynamic` to only run in dynamic analysis mode, or specify a different workload."
       }
     },
     "cmn_analysis": {
@@ -2816,6 +2996,12 @@
       }
     },
     "neoprof": {
+      "ANDROID_PACKAGE_NOT_DEBUGGABLE": {
+        "Severity": "Error",
+        "Message": "The Android package `{package}` cannot be profiled.",
+        "Explanation": "The selected Android package is not debuggable, so Android denied the profiling tool access to the application.",
+        "Advice": "Install and select a debuggable build of the application, then run the recipe again."
+      },
       "INVALID_MODE_PARAM": {
         "Severity": "Error",
         "Message": "The recipe provided an invalid `mode` parameter to the `neoprof` tool.",
@@ -2839,6 +3025,18 @@
         "Message": "The `neoprof` tool failed during profiling.",
         "Explanation": "The specified recipe invokes the `neoprof` tool. This tool failed unexpectedly; {tool} returned exit code `{code}` during profiling.",
         "Advice": "If the issue continues, contact Arm support."
+      },
+      "PARQUET_TO_JSON_RUN_FAILED": {
+        "Severity": "Error",
+        "Message": "The `parquet-to-json` tool failed to convert the profiling metadata.",
+        "Explanation": "After profiling, {$PRODUCT_FULL_NAME} ran the `parquet-to-json` tool to convert the counter metadata. The tool returned exit code `{exitCode}`.",
+        "Advice": "Run the recipe again. If the issue continues, contact Arm support."
+      },
+      "PARQUET_TO_JSON_OUTPUT_PARSE_FAILED": {
+        "Severity": "Error",
+        "Message": "The `parquet-to-json` tool returned invalid profiling metadata.",
+        "Explanation": "After profiling, {$PRODUCT_FULL_NAME} ran the `parquet-to-json` tool to convert the counter metadata. The tool returned output that is not a valid JSON array.",
+        "Advice": "Run the recipe again. If the issue continues, contact Arm support."
       },
       "FILE_DESCRIPTORS": {
         "Severity": "Error",

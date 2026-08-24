@@ -6,12 +6,24 @@ package daemon
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestIsolateDaemonProcess(t *testing.T) {
+	cmd := exec.Command("unused")
+
+	isolateDaemonProcess(cmd)
+
+	assert.Equal(t, uint32(syscall.CREATE_NEW_PROCESS_GROUP), cmd.SysProcAttr.CreationFlags)
+}
 
 func TestStart(t *testing.T) {
 	daemon := NewDaemon()
@@ -45,6 +57,22 @@ func TestStart(t *testing.T) {
 		assert.Error(t, err)
 	})
 
+	t.Run("KillAndWait returns after command exits successfully during startup check", func(t *testing.T) {
+		process, err := daemon.StartProcess("powershell", []string{"-command", "exit 0"})
+		assert.NoError(t, err)
+
+		assertExecutedInLessThan(t, func() {
+			assert.NoError(t, process.KillAndWait())
+		}, 750*time.Millisecond)
+	})
+
+	t.Run("KillAndWait treats successfully killed process as successful cleanup", func(t *testing.T) {
+		process, err := daemon.StartProcess("powershell", []string{"-command", "Start-Sleep", "-s", "10"})
+		assert.NoError(t, err)
+
+		assert.NoError(t, process.KillAndWait())
+	})
+
 	t.Run("Logs a debug message when command was run succesfully", func(t *testing.T) {
 		buffer := &bytes.Buffer{}
 		restoreLogOutputAndLevel := setLogOutputAndLevel(buffer, log.DebugLevel)
@@ -58,15 +86,61 @@ func TestStart(t *testing.T) {
 		assert.Contains(t, got, fmt.Sprintf("%d", pid))
 	})
 
-	t.Run("Logs an error message when command failed to run", func(t *testing.T) {
-		buffer := &bytes.Buffer{}
-		restoreLogOutputAndLevel := setLogOutputAndLevel(buffer, log.ErrorLevel)
-		defer restoreLogOutputAndLevel()
+}
 
-		_, err := daemon.Start("not-a-command", []string{})
-		assert.Error(t, err)
+func TestStartAttachedForwardsChildStderr(t *testing.T) {
+	readStderr, writeStderr, err := os.Pipe()
+	assert.NoError(t, err)
+	defer readStderr.Close()
 
-		got := buffer.String()
-		assert.Contains(t, got, "Unable to start daemon process")
+	originalStderr := os.Stderr
+	os.Stderr = writeStderr
+	defer func() { os.Stderr = originalStderr }()
+
+	daemon := NewDaemon()
+	_, err = daemon.StartAttached("powershell", []string{
+		"-command",
+		"[Console]::Error.Write('child-stderr')",
 	})
+	assert.NoError(t, err)
+
+	os.Stderr = originalStderr
+	assert.NoError(t, writeStderr.Close())
+	output, err := io.ReadAll(readStderr)
+	assert.NoError(t, err)
+	assert.Equal(t, "child-stderr", string(output))
+}
+
+func TestLogAttachedProcessExitStatus(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	restoreLogOutputAndLevel := setLogOutputAndLevel(buffer, log.ErrorLevel)
+	defer restoreLogOutputAndLevel()
+
+	cmd := exec.Command("powershell", "-command", "exit 7")
+	err := cmd.Run()
+	assert.Error(t, err)
+
+	logAttachedProcessExit(completedStartedProcess(cmd, err))
+
+	got := buffer.String()
+	assert.Contains(t, got, "Attached daemon process exited with an error")
+	assert.Contains(t, got, fmt.Sprintf("PID=%d", cmd.Process.Pid))
+	assert.Contains(t, got, "exit-code=7")
+}
+
+func TestLogAttachedProcessSuccessfulExit(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	restoreLogOutputAndLevel := setLogOutputAndLevel(buffer, log.DebugLevel)
+	defer restoreLogOutputAndLevel()
+
+	cmd := exec.Command("powershell", "-command", "exit 0")
+	err := cmd.Run()
+	assert.NoError(t, err)
+
+	logAttachedProcessExit(completedStartedProcess(cmd, err))
+
+	got := buffer.String()
+	assert.Contains(t, got, "Attached daemon process exited")
+	assert.Contains(t, got, "exit-code=0")
+	assert.NotContains(t, got, "error")
 }

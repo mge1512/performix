@@ -16,7 +16,7 @@ func TestGetSpecification(t *testing.T) {
 
 	require.True(t, ok)
 	assert.Equal(t, "Neoverse-V3AE", specification.CPUModel)
-	assert.Equal(t, NeoverseV3JSON, specification.JSON)
+	assert.Equal(t, NeoverseV3AEJSON, specification.JSON)
 }
 
 func TestGetSpecificationReturnsNoMatchForUnknownCPU(t *testing.T) {
@@ -31,12 +31,17 @@ func TestAllSpecificationsContainTelemetryData(t *testing.T) {
 		t.Run(model, func(t *testing.T) {
 			specification, ok := GetSpecification(model)
 			require.True(t, ok)
-
-			payload, err := ParseTelemetryJSON(specification.JSON)
-			require.NoError(t, err)
-			assert.NotEmpty(t, payload.Events)
-			assert.NotEmpty(t, payload.Metrics)
-			assert.NotEmpty(t, payload.Groups.Metrics)
+			assertSpecificationContainsTelemetryData(t, specification.JSON)
 		})
 	}
+}
+
+func assertSpecificationContainsTelemetryData(t *testing.T, specificationJSON string) {
+	t.Helper()
+
+	payload, err := ParseTelemetryJSON(specificationJSON)
+	require.NoError(t, err)
+	assert.NotEmpty(t, payload.Events)
+	assert.NotEmpty(t, payload.Metrics)
+	assert.NotEmpty(t, payload.Groups.Metrics)
 }

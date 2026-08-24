@@ -16,7 +16,9 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
 	"github.com/Arm-Debug/apap-cli/apap-engine/cmdsync"
 	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
+	"github.com/Arm-Debug/apap-cli/apap-engine/locality"
 	"github.com/Arm-Debug/apap-cli/apap-engine/logging/logx"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/notifiers"
 	"github.com/Arm-Debug/apap-cli/apap-engine/packages"
 	"github.com/Arm-Debug/apap-cli/apap-engine/run"
@@ -42,6 +44,7 @@ type ExecutionContext interface {
 	TargetInfo() *target.Description
 	GetRunDescriptions() []*run.RunDescription
 	GetRunModels() []cdf.ModelView
+	GetToolCapabilities(runIndex int, toolName string, invocationIndex int) (run.ToolCapabilities, error)
 	GetTool(toolInfo tool.ToolInfo) string
 	ToolsDir() string
 	RunToolIntegrations(context context.Context, cmdStateCh *cmdsync.CommandStateChannel, intCtxs []tool.IntegrationContext) (func(), []error)
@@ -62,6 +65,7 @@ type RunExecutionContext struct {
 	AgentSupplier                 AgentConnSupplier
 	RunDescriptions               []*run.RunDescription
 	RunModels                     []cdf.ModelView
+	RunCapabilities               []run.RunCapabilities
 	PlatformConfigurationSupplier PlatformConfigurationSupplier
 	ToolPathsSupplier             ToolDeploymentPathsSupplier
 	TargetFilesystemSupplier      TargetFilesystemSupplier
@@ -139,6 +143,59 @@ func (c *RunExecutionContext) GetRunModels() []cdf.ModelView {
 	return c.RunModels
 }
 
+func (c *RunExecutionContext) GetToolCapabilities(runIndex int, toolName string, invocationIndex int) (run.ToolCapabilities, error) {
+	if runIndex < 0 || runIndex >= len(c.RunCapabilities) || runIndex >= len(c.RunDescriptions) {
+		return nil, fmt.Errorf("GetToolCapabilities: run index %v out of bounds for %v runs", runIndex, len(c.RunCapabilities))
+	}
+
+	if c.RunDescriptions[runIndex].ToolsUsed != nil {
+		// Verify that the specified tool name and invocation exists
+		// Some very old runs may not have `toolsUsed` registered; in this case, we skip this check. Skipping
+		// this does not affect correctness; the returned ToolCapabilities struct will still record only the
+		// capabilities that are present in the run, we just can't fail early
+
+		// Check if tool name has been migrated
+		migratedToolName, wasMigrated, err := cdf.MigrateToolName(toolName, c.RunCapabilities[runIndex].Migrations)
+		if err != nil {
+			return nil, err
+		}
+		var toolFound bool
+		toolsForRun := c.RunDescriptions[runIndex].ToolsUsed
+		for _, toolUsed := range toolsForRun {
+			// Check both requested path and migrated path (if exists)
+			if (toolUsed.Tool == toolName || (wasMigrated && toolUsed.Tool == migratedToolName)) &&
+				toolUsed.Invocation == invocationIndex {
+				toolFound = true
+				break
+			}
+		}
+		if !toolFound {
+			return nil, fmt.Errorf("GetToolCapabilities: tool %q invocation %v not found for run index %v", toolName, invocationIndex, runIndex)
+		}
+	}
+
+	// Try unmigrated path first
+	invocationPath := fmt.Sprintf("tool/%s/%d", toolName, invocationIndex)
+	if capabilities, ok := c.RunCapabilities[runIndex].CapabilitiesPerTool[invocationPath]; ok {
+		return capabilities, nil
+	}
+
+	// Attempt to migrate requested path
+	migratedPath, wasMigrated, err := cdf.MigratePath(invocationPath, c.RunCapabilities[runIndex].Migrations)
+	if err != nil {
+		return nil, err
+	}
+	if wasMigrated {
+		if capabilities, ok := c.RunCapabilities[runIndex].CapabilitiesPerTool[migratedPath]; ok {
+			return capabilities, nil
+		}
+	}
+
+	// We don't error here because a particular tool invocation may not have any capabilities recorded - this
+	// isn't an error case
+	return run.ToolCapabilities{}, nil
+}
+
 func (c *RunExecutionContext) GetTool(toolInfo tool.ToolInfo) string {
 	platformConfig := c.PlatformConfigurationSupplier()
 	paths := c.toolPaths()
@@ -147,6 +204,55 @@ func (c *RunExecutionContext) GetTool(toolInfo tool.ToolInfo) string {
 
 func (c *RunExecutionContext) ToolsDir() string {
 	return c.toolPaths().DeployedToolsDirectory
+}
+
+// recordRunStopSupport records the support advertised by the tool factories
+// already selected for the current probe or collection operation.
+func (c *RunExecutionContext) recordRunStopSupport(ctx context.Context, intCtxs []tool.IntegrationContext, tr *tool.Registry) error {
+	if c.Collector == nil ||
+		c.Collector.CollectionState == nil ||
+		c.Collector.CollectionState.RunMetadataUpdater == nil ||
+		len(intCtxs) == 0 {
+		return nil
+	}
+
+	// This summarizes only the selected batch. AccumulateSupportsStop combines
+	// it with the run's persisted result from any earlier probe or tool batch.
+	supportsStop := true
+	for _, intCtx := range intCtxs {
+		factory := tr.FindTool(intCtx.Name, intCtx.Version)
+		if factory == nil {
+			// The integration runner reports this per-tool error. Do not let
+			// capability bookkeeping change that failure isolation, but do not
+			// advertise stop support that cannot be established.
+			supportsStop = false
+			continue
+		}
+
+		toolSupportsStop := tool.SupportsStop(factory)
+		supportsStop = supportsStop && toolSupportsStop
+	}
+
+	if ctx.Err() != nil {
+		// The operation is already ending, so do not delay teardown waiting for
+		// a run lock merely to publish capability metadata.
+		return nil
+	}
+	if err := c.Collector.CollectionState.RunMetadataUpdater.AccumulateSupportsStop(ctx, supportsStop); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("record run stop support: %w", err)
+	}
+	return nil
+}
+
+func integrationErrors(count int, err error) []error {
+	errs := make([]error, count)
+	for i := range errs {
+		errs[i] = err
+	}
+	return errs
 }
 
 func (c *RunExecutionContext) RunToolIntegrations(ctx context.Context, cmdStateCh *cmdsync.CommandStateChannel, intCtxs []tool.IntegrationContext) (func(), []error) {
@@ -163,11 +269,10 @@ func (c *RunExecutionContext) RunToolIntegrations(ctx context.Context, cmdStateC
 	tr, err := c.PackageManager.FindToolIntegrations()
 	if err != nil {
 		// Response expects an error for each integration context, replicate the error for all contexts
-		errs := make([]error, len(intCtxs))
-		for i := range errs {
-			errs[i] = err
-		}
-		return cleanup, errs
+		return cleanup, integrationErrors(len(intCtxs), err)
+	}
+	if err := c.recordRunStopSupport(ctx, intCtxs, tr); err != nil {
+		return cleanup, integrationErrors(len(intCtxs), err)
 	}
 
 	errs := tool.RunAndReformatToolIntegrations(
@@ -219,11 +324,10 @@ func (c *RunExecutionContext) ProbeToolsFromIntegrations(ctx context.Context, cm
 	tr, err := c.PackageManager.FindToolIntegrations()
 	if err != nil {
 		// Response expects an error for each integration context, replicate the error for all contexts
-		errs := make([]error, len(intCtxs))
-		for i := range errs {
-			errs[i] = err
-		}
-		return nil, errs
+		return nil, integrationErrors(len(intCtxs), err)
+	}
+	if err := c.recordRunStopSupport(ctx, intCtxs, tr); err != nil {
+		return nil, integrationErrors(len(intCtxs), err)
 	}
 	return tool.ProbeTools(
 		intCtxs,
@@ -242,7 +346,7 @@ func (c *RunExecutionContext) newEngineLocalities(runCtx context.Context, preser
 	sharedExecCtx, cancelSharedExec := context.WithCancelCause(runCtx)
 
 	targetLocality, targetCleanup := c.newEngineLocality(
-		tool.LocalityTarget,
+		locality.Target,
 		sharedExecCtx,
 		cancelSharedExec,
 		agentConn,
@@ -254,7 +358,7 @@ func (c *RunExecutionContext) newEngineLocalities(runCtx context.Context, preser
 		targetLocality,
 		targetCleanup,
 		func() (tool.EngineLocality, func(), error) {
-			hostSession, err := c.TargetSessions.TargetSession(&target.LocalTarget{})
+			hostSession, err := c.TargetSessions.HostSession()
 			if err != nil {
 				return tool.EngineLocality{}, nil, err
 			}
@@ -272,7 +376,7 @@ func (c *RunExecutionContext) newEngineLocalities(runCtx context.Context, preser
 			}
 
 			hostLocality, hostCleanup := c.newEngineLocality(
-				tool.LocalityHost,
+				locality.Host,
 				sharedExecCtx,
 				cancelSharedExec,
 				agentConn,
@@ -315,6 +419,7 @@ func (c *RunExecutionContext) newEngineLocality(
 		c.UsrMessageWriter,
 		preserveTemporaryDirs,
 		c.RootWorkerEnabled,
+		targetPlatform.PlatformConfiguration,
 	)
 
 	return tool.EngineLocality{
@@ -337,16 +442,22 @@ func (c *RunExecutionContext) newEngineLocality(
 }
 
 func (c *RunExecutionContext) copyFile(sourceLocality string, destinationLocality string, sourcePath string, destinationPath string) error {
-	if sourceLocality != tool.LocalityTarget {
-		return fmt.Errorf("unsupported source locality %q", sourceLocality)
+	if sourceLocality != locality.Target {
+		return message.New(message.EngineToolCopyFromUnsupportedSourceLocality).WithMetadata(map[string]string{
+			"sourceLocality":      sourceLocality,
+			"destinationLocality": destinationLocality,
+		})
 	}
-	if destinationLocality != tool.LocalityHost {
-		return fmt.Errorf("unsupported destination locality %q", destinationLocality)
+	if destinationLocality != locality.Host {
+		return message.New(message.EngineToolCopyFromUnsupportedDestinationLocality).WithMetadata(map[string]string{
+			"sourceLocality":      sourceLocality,
+			"destinationLocality": destinationLocality,
+		})
 	}
 
 	retriever, ok := c.Collector.FileRetriever.(*TransferManagerRetriever)
 	if !ok {
-		return fmt.Errorf("copyFrom requires APXD_ENABLE_TRANSFER_MANAGER=true")
+		return message.New(message.EngineToolCopyFromTransferManagerDisabled)
 	}
 
 	sourcePath = c.TargetPlatform().Path.GetFullPath(sourcePath, "")

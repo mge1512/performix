@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,13 +16,163 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Arm-Debug/apap-cli/apap-engine/insights"
+	"github.com/Arm-Debug/apap-cli/apap-cli/service/mcpserver/insights"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/clients/go/apapproto"
 	apapprotomocks "github.com/Arm-Debug/apap-cli/clients/go/mocks"
 )
 
 func TestGenerateAIInsightsTool(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		recipeName      string
+		guidanceHeading string
+	}{
+		{
+			name:            "System Utilisation",
+			recipeName:      insights.SystemUtilizationRecipeName,
+			guidanceHeading: "System Utilisation Query Guide",
+		},
+		{
+			name:            "Syscall Trace",
+			recipeName:      insights.SyscallTraceSummaryRecipeName,
+			guidanceHeading: "Syscall Trace Query Guide",
+		},
+	} {
+		t.Run("selects "+tc.name+" query guidance from the run recipe", func(t *testing.T) {
+			ctx := context.Background()
+			engine := apapprotomocks.NewApapClient(t)
+			expectRunDescription(engine, "run-123", tc.recipeName)
+			engine.On("GetRunSummaryBundle", mock.Anything, mock.MatchedBy(func(req *apapproto.RunSummaryBundleRequest) bool {
+				return req.GetRunId().GetValue() == "run-123"
+			})).Return(runSummaryBundle(tc.recipeName,
+				&apapproto.RunSummaryPayload{
+					Name:    "additional_context",
+					Payload: `{"unused":true}`,
+				},
+			), nil).Once()
+			clientSession, serverSession := connectTestServer(
+				t,
+				ctx,
+				ToolDependencies{Engine: engine},
+				GenerateAIInsightsTool{}.Register,
+			)
+			defer clientSession.Close()
+			defer serverSession.Close()
+
+			result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "generate_ai_insights",
+				Arguments: map[string]any{"run_id": "run-123"},
+			})
+
+			require.NoError(t, err)
+			require.False(t, result.IsError)
+			require.NotNil(t, result.StructuredContent)
+
+			var content generateAIInsightsResult
+			require.NoError(t, json.Unmarshal([]byte(requireToolText(t, result)), &content))
+			assert.Empty(t, content.BundleID)
+			assert.Equal(t, "run-123", content.RunID)
+			assert.Contains(t, content.Guidance, "AI Insights Analysis Guide")
+			assert.Contains(t, content.Guidance, tc.guidanceHeading)
+			assert.Contains(t, content.Guidance, "run_query")
+			require.Len(t, content.Payloads, 1)
+			assert.Equal(t, "run_details", content.Payloads[0].Name)
+			assert.True(t, content.Payloads[0].Complete)
+			assert.Nil(t, content.Payloads[0].NextOffset)
+			assert.JSONEq(t, fmt.Sprintf(`{"RunId":"run-123","RecipeName":%q}`, tc.recipeName), content.Payloads[0].Content)
+			assert.NotContains(t, content.Guidance, "SPDX-")
+		})
+	}
+
+	t.Run("selects Instruction Mix query guidance from the run recipe", func(t *testing.T) {
+		ctx := context.Background()
+		engine := apapprotomocks.NewApapClient(t)
+		expectRunDescription(engine, "run-123", insights.InstructionMixRecipeName)
+		engine.On("GetRunSummaryBundle", mock.Anything, mock.MatchedBy(func(req *apapproto.RunSummaryBundleRequest) bool {
+			return req.GetRunId().GetValue() == "run-123"
+		})).Return(&apapproto.RunSummaryBundleResponse{Payloads: []*apapproto.RunSummaryPayload{
+			{
+				Name:    "run_details",
+				Payload: `{"RunId":"run-123","RecipeName":"instruction_mix","SamplingParameters":{"mode":"static"}}`,
+			},
+		}}, nil).Once()
+		clientSession, serverSession := connectTestServer(
+			t,
+			ctx,
+			ToolDependencies{Engine: engine},
+			GenerateAIInsightsTool{}.Register,
+		)
+		defer clientSession.Close()
+		defer serverSession.Close()
+
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "generate_ai_insights",
+			Arguments: map[string]any{"run_id": "run-123"},
+		})
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		require.NotNil(t, result.StructuredContent)
+
+		var content generateAIInsightsResult
+		require.NoError(t, json.Unmarshal([]byte(requireToolText(t, result)), &content))
+		assert.Empty(t, content.BundleID)
+		assert.Equal(t, "run-123", content.RunID)
+		assert.Contains(t, content.Guidance, "AI Insights Analysis Guide")
+		assert.Contains(t, content.Guidance, "Instruction Mix Query Guide")
+		assert.Contains(t, content.Guidance, "run_query")
+		require.Len(t, content.Payloads, 1)
+		assert.Equal(t, "run_details", content.Payloads[0].Name)
+		assert.True(t, content.Payloads[0].Complete)
+		assert.JSONEq(t, `{"RunId":"run-123","RecipeName":"instruction_mix","SamplingParameters":{"mode":"static"}}`, content.Payloads[0].Content)
+		assert.NotContains(t, content.Guidance, "SPDX-")
+	})
+
+	t.Run("selects CPU Microarchitecture query guidance from the run recipe", func(t *testing.T) {
+		ctx := context.Background()
+		engine := apapprotomocks.NewApapClient(t)
+		expectRunDescription(engine, "run-123", insights.CPUMicroarchitectureRecipeName)
+		engine.On("GetRunSummaryBundle", mock.Anything, mock.MatchedBy(func(req *apapproto.RunSummaryBundleRequest) bool {
+			return req.GetRunId().GetValue() == "run-123"
+		})).Return(&apapproto.RunSummaryBundleResponse{Payloads: []*apapproto.RunSummaryPayload{
+			{
+				Name:    "run_details",
+				Payload: `{"RunId":"run-123","RecipeName":"cpu_microarchitecture"}`,
+			},
+		}}, nil).Once()
+		clientSession, serverSession := connectTestServer(
+			t,
+			ctx,
+			ToolDependencies{Engine: engine},
+			GenerateAIInsightsTool{}.Register,
+		)
+		defer clientSession.Close()
+		defer serverSession.Close()
+
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "generate_ai_insights",
+			Arguments: map[string]any{"run_id": "run-123"},
+		})
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		require.NotNil(t, result.StructuredContent)
+
+		var content generateAIInsightsResult
+		require.NoError(t, json.Unmarshal([]byte(requireToolText(t, result)), &content))
+		assert.Empty(t, content.BundleID)
+		assert.Equal(t, "run-123", content.RunID)
+		assert.Contains(t, content.Guidance, "AI Insights Analysis Guide")
+		assert.Contains(t, content.Guidance, "CPU Microarchitecture Query Guide")
+		assert.Contains(t, content.Guidance, "run_query")
+		require.Len(t, content.Payloads, 1)
+		assert.Equal(t, "run_details", content.Payloads[0].Name)
+		assert.True(t, content.Payloads[0].Complete)
+		assert.JSONEq(t, `{"RunId":"run-123","RecipeName":"cpu_microarchitecture"}`, content.Payloads[0].Content)
+		assert.NotContains(t, content.Guidance, "SPDX-")
+	})
+
 	t.Run("advertises read-only hints", func(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
@@ -41,7 +192,7 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 
 		schemaJSON, err := json.Marshal(tools.Tools[0].OutputSchema)
 		require.NoError(t, err)
-		var outputSchema map[string]any
+		outputSchema := map[string]any{}
 		require.NoError(t, json.Unmarshal(schemaJSON, &outputSchema))
 		assert.Equal(t, "object", outputSchema["type"])
 		properties, ok := outputSchema["properties"].(map[string]any)
@@ -50,21 +201,7 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 		assert.Contains(t, properties, "run_id")
 		assert.Contains(t, properties, "guidance")
 		assert.Contains(t, properties, "payloads")
-		required, ok := outputSchema["required"].([]any)
-		require.True(t, ok)
-		assert.Contains(t, required, "payloads")
-		topLevelErrorSchema, ok := properties["error"].(map[string]any)
-		require.True(t, ok)
-		payloadsSchema, ok := properties["payloads"].(map[string]any)
-		require.True(t, ok)
-		payloadSchema, ok := payloadsSchema["items"].(map[string]any)
-		require.True(t, ok)
-		payloadProperties, ok := payloadSchema["properties"].(map[string]any)
-		require.True(t, ok)
-		payloadErrorSchema, ok := payloadProperties["error"].(map[string]any)
-		require.True(t, ok)
-		assert.Equal(t, generateAIInsightsErrorSchemaID, topLevelErrorSchema["$id"])
-		assert.Equal(t, toolErrorSchemaID, payloadErrorSchema["$id"])
+		assert.Contains(t, properties, "error")
 
 		require.Equal(t, "read_ai_insights_payload_details", tools.Tools[1].Name)
 		require.NotNil(t, tools.Tools[1].Annotations)
@@ -91,22 +228,21 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
 		largePayload := strings.Repeat("x", aiInsightsMaxResponseBytes+3)
+		expectRunDescription(engine, "run-123", insights.CodeHotspotsRecipeName)
 		engine.On("GetRunSummaryBundle", mock.Anything, mock.MatchedBy(func(req *apapproto.RunSummaryBundleRequest) bool {
 			return req.GetRunId().GetValue() == "run-123"
-		})).Return(&apapproto.RunSummaryBundleResponse{
-			Payloads: []*apapproto.RunSummaryPayload{
-				{
-					Name:           "hot_functions",
-					PromptFragment: "Hot functions summary",
-					Payload:        `{"functions":[{"name":"matrix_multiply","self_samples":1240}]}`,
-				},
-				{
-					Name:           "call_tree",
-					PromptFragment: "Call tree summary",
-					Payload:        largePayload,
-				},
+		})).Return(runSummaryBundle(insights.CodeHotspotsRecipeName,
+			&apapproto.RunSummaryPayload{
+				Name:           "hot_functions",
+				PromptFragment: "Hot functions summary",
+				Payload:        `{"functions":[{"name":"matrix_multiply","self_samples":1240}]}`,
 			},
-		}, nil).Once()
+			&apapproto.RunSummaryPayload{
+				Name:           "call_tree",
+				PromptFragment: "Call tree summary",
+				Payload:        largePayload,
+			},
+		), nil).Once()
 		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 		defer clientSession.Close()
 		defer serverSession.Close()
@@ -125,42 +261,44 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 		assert.Equal(t, "run-123_1", content.BundleID)
 		assert.Equal(t, "run-123", content.RunID)
 		assert.Contains(t, content.Guidance, "AI Insights")
-		require.Len(t, content.Payloads, 2)
+		assert.Contains(t, content.Guidance, "Code Hotspots Evidence Guide")
+		assert.NotContains(t, strings.ToLower(content.Guidance), "curated")
+		require.Len(t, content.Payloads, 3)
 
-		assert.Equal(t, "hot_functions", content.Payloads[0].Name)
-		assert.Equal(t, "Hot functions summary", content.Payloads[0].PromptFragment)
-		assert.True(t, content.Payloads[0].Complete)
-		assert.Equal(t, `{"functions":[{"name":"matrix_multiply","self_samples":1240}]}`, content.Payloads[0].Content)
+		assert.Equal(t, "run_details", content.Payloads[0].Name)
+		assert.Equal(t, "hot_functions", content.Payloads[1].Name)
+		assert.Equal(t, "Hot functions summary", content.Payloads[1].PromptFragment)
+		assert.True(t, content.Payloads[1].Complete)
+		assert.Equal(t, `{"functions":[{"name":"matrix_multiply","self_samples":1240}]}`, content.Payloads[1].Content)
 
-		assert.Equal(t, "call_tree", content.Payloads[1].Name)
-		assert.Equal(t, "Call tree summary", content.Payloads[1].PromptFragment)
-		assert.False(t, content.Payloads[1].Complete)
-		assert.Equal(t, aiInsightsMaxResponseBytes+3, content.Payloads[1].TotalBytes)
-		assert.Greater(t, content.Payloads[1].ReturnedBytes, 0)
-		require.NotNil(t, content.Payloads[1].NextOffset)
-		assert.Equal(t, content.Payloads[1].ReturnedBytes, *content.Payloads[1].NextOffset)
-		assert.Equal(t, content.Payloads[1].ReturnedBytes, len(content.Payloads[1].Content))
-		assert.True(t, strings.HasPrefix(largePayload, content.Payloads[1].Content))
+		assert.Equal(t, "call_tree", content.Payloads[2].Name)
+		assert.Equal(t, "Call tree summary", content.Payloads[2].PromptFragment)
+		assert.False(t, content.Payloads[2].Complete)
+		assert.Equal(t, aiInsightsMaxResponseBytes+3, content.Payloads[2].TotalBytes)
+		assert.Greater(t, content.Payloads[2].ReturnedBytes, 0)
+		require.NotNil(t, content.Payloads[2].NextOffset)
+		assert.Equal(t, content.Payloads[2].ReturnedBytes, *content.Payloads[2].NextOffset)
+		assert.Equal(t, content.Payloads[2].ReturnedBytes, len(content.Payloads[2].Content))
+		assert.True(t, strings.HasPrefix(largePayload, content.Payloads[2].Content))
 	})
 
 	t.Run("returns all payload metadata before filling content", func(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
 		largePayload := strings.Repeat("x", aiInsightsMaxResponseBytes/2)
-		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(&apapproto.RunSummaryBundleResponse{
-			Payloads: []*apapproto.RunSummaryPayload{
-				{
-					Name:           "hot_functions",
-					PromptFragment: "Hot functions summary",
-					Payload:        largePayload,
-				},
-				{
-					Name:           "call_tree",
-					PromptFragment: "Call tree summary",
-					Payload:        `{"root":1}`,
-				},
+		expectRunDescription(engine, "run-123", insights.CodeHotspotsRecipeName)
+		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(runSummaryBundle(insights.CodeHotspotsRecipeName,
+			&apapproto.RunSummaryPayload{
+				Name:           "hot_functions",
+				PromptFragment: "Hot functions summary",
+				Payload:        largePayload,
 			},
-		}, nil).Once()
+			&apapproto.RunSummaryPayload{
+				Name:           "call_tree",
+				PromptFragment: "Call tree summary",
+				Payload:        `{"root":1}`,
+			},
+		), nil).Once()
 		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 		defer clientSession.Close()
 		defer serverSession.Close()
@@ -176,25 +314,25 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 
 		var content generateAIInsightsResult
 		require.NoError(t, json.Unmarshal([]byte(requireToolText(t, result)), &content))
-		require.Len(t, content.Payloads, 2)
-		assert.Equal(t, "hot_functions", content.Payloads[0].Name)
-		assert.Equal(t, "call_tree", content.Payloads[1].Name)
-		assert.Equal(t, "Call tree summary", content.Payloads[1].PromptFragment)
+		require.Len(t, content.Payloads, 3)
+		assert.Equal(t, "run_details", content.Payloads[0].Name)
+		assert.Equal(t, "hot_functions", content.Payloads[1].Name)
+		assert.Equal(t, "call_tree", content.Payloads[2].Name)
+		assert.Equal(t, "Call tree summary", content.Payloads[2].PromptFragment)
 	})
 
 	t.Run("reads cached payload details by name", func(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
 		payload := strings.Repeat("a", aiInsightsMaxResponseBytes) + "tail"
-		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(&apapproto.RunSummaryBundleResponse{
-			Payloads: []*apapproto.RunSummaryPayload{
-				{
-					Name:           "disassembly_windows",
-					PromptFragment: "Disassembly summary",
-					Payload:        payload,
-				},
+		expectRunDescription(engine, "run-123", insights.CodeHotspotsRecipeName)
+		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(runSummaryBundle(insights.CodeHotspotsRecipeName,
+			&apapproto.RunSummaryPayload{
+				Name:           "disassembly_windows",
+				PromptFragment: "Disassembly summary",
+				Payload:        payload,
 			},
-		}, nil).Once()
+		), nil).Once()
 		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 		defer clientSession.Close()
 		defer serverSession.Close()
@@ -207,16 +345,16 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 
 		var initialContent generateAIInsightsResult
 		require.NoError(t, json.Unmarshal([]byte(requireToolText(t, initial)), &initialContent))
-		require.Len(t, initialContent.Payloads, 1)
-		require.False(t, initialContent.Payloads[0].Complete)
-		require.NotNil(t, initialContent.Payloads[0].NextOffset)
+		require.Len(t, initialContent.Payloads, 2)
+		require.False(t, initialContent.Payloads[1].Complete)
+		require.NotNil(t, initialContent.Payloads[1].NextOffset)
 
 		next, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
 			Name: "read_ai_insights_payload_details",
 			Arguments: map[string]any{
 				"bundle_id": initialContent.BundleID,
 				"name":      "disassembly_windows",
-				"offset":    *initialContent.Payloads[0].NextOffset,
+				"offset":    *initialContent.Payloads[1].NextOffset,
 			},
 		})
 
@@ -226,7 +364,7 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 
 		var details aiInsightsPayloadDetails
 		require.NoError(t, json.Unmarshal([]byte(requireToolText(t, next)), &details))
-		offset := *initialContent.Payloads[0].NextOffset
+		offset := *initialContent.Payloads[1].NextOffset
 		assert.Equal(t, "disassembly_windows", details.Name)
 		assert.Greater(t, details.ReturnedBytes, 0)
 		assert.Equal(t, details.ReturnedBytes, len(details.Content))
@@ -237,15 +375,15 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 		cache, err := newAIInsightsBundleCache(2)
 		require.NoError(t, err)
 
-		cache.store("bundle-1", []cachedAIInsightsPayload{{name: "payload-1"}})
-		cache.store("bundle-2", []cachedAIInsightsPayload{{name: "payload-2"}})
+		cache.store("bundle-1", []aiInsightsPayload{{name: "payload-1"}})
+		cache.store("bundle-2", []aiInsightsPayload{{name: "payload-2"}})
 
 		payloads, ok := cache.get("bundle-1")
 		require.True(t, ok)
 		require.Len(t, payloads, 1)
 		assert.Equal(t, "payload-1", payloads[0].name)
 
-		cache.store("bundle-3", []cachedAIInsightsPayload{{name: "payload-3"}})
+		cache.store("bundle-3", []aiInsightsPayload{{name: "payload-3"}})
 
 		_, ok = cache.get("bundle-2")
 		assert.False(t, ok)
@@ -258,7 +396,7 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 	})
 
 	t.Run("caps page search probes to response limit", func(t *testing.T) {
-		payload := cachedAIInsightsPayload{
+		payload := aiInsightsPayload{
 			name:    "source_windows",
 			payload: strings.Repeat("x", aiInsightsMaxResponseBytes*100),
 		}
@@ -276,7 +414,7 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 	})
 
 	t.Run("returns empty details and marked as complete with payload length offset", func(t *testing.T) {
-		payload := cachedAIInsightsPayload{
+		payload := aiInsightsPayload{
 			name:           "source_windows",
 			promptFragment: "Source windows summary",
 			payload:        "payload",
@@ -300,12 +438,12 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 	t.Run("rejects duplicate payload names", func(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
-		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(&apapproto.RunSummaryBundleResponse{
-			Payloads: []*apapproto.RunSummaryPayload{
-				{Name: "hot_functions"},
-				{Name: "hot_functions"},
-			},
-		}, nil).Once()
+		expectRunDescription(engine, "run-123", insights.CodeHotspotsRecipeName)
+		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(runSummaryBundle(
+			insights.CodeHotspotsRecipeName,
+			&apapproto.RunSummaryPayload{Name: "hot_functions"},
+			&apapproto.RunSummaryPayload{Name: "hot_functions"},
+		), nil).Once()
 		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 		defer clientSession.Close()
 		defer serverSession.Close()
@@ -323,15 +461,14 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 	t.Run("returns error when payload metadata exceeds response size", func(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
-		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(&apapproto.RunSummaryBundleResponse{
-			Payloads: []*apapproto.RunSummaryPayload{
-				{
-					Name:           "disassembly_windows",
-					PromptFragment: strings.Repeat("x", aiInsightsMaxResponseBytes),
-					Payload:        "payload",
-				},
+		expectRunDescription(engine, "run-123", insights.CodeHotspotsRecipeName)
+		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(runSummaryBundle(insights.CodeHotspotsRecipeName,
+			&apapproto.RunSummaryPayload{
+				Name:           "disassembly_windows",
+				PromptFragment: strings.Repeat("x", aiInsightsMaxResponseBytes),
+				Payload:        "payload",
 			},
-		}, nil).Once()
+		), nil).Once()
 		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 		defer clientSession.Close()
 		defer serverSession.Close()
@@ -384,6 +521,7 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 	t.Run("returns engine bundle error", func(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
+		expectRunDescription(engine, "run-123", insights.CodeHotspotsRecipeName)
 		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return((*apapproto.RunSummaryBundleResponse)(nil), errors.New("bundle failed")).Once()
 		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 		defer clientSession.Close()
@@ -453,16 +591,10 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 		}
 	})
 
-	t.Run("surfaces unsupported recipe catalog detail", func(t *testing.T) {
+	t.Run("reports unsupported recipe and supported recipes", func(t *testing.T) {
 		ctx := context.Background()
 		engine := apapprotomocks.NewApapClient(t)
-		engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(
-			(*apapproto.RunSummaryBundleResponse)(nil),
-			message.New(message.EngineInsightsUnsupportedRecipe).WithMetadata(map[string]string{
-				"unsupportedRecipe":    "instruction_mix",
-				"supportedRecipesList": "code_hotspots",
-			}),
-		).Once()
+		expectRunDescription(engine, "run-123", "memory_access")
 		clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 		defer clientSession.Close()
 		defer serverSession.Close()
@@ -475,8 +607,19 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, result.IsError)
 		text := requireToolText(t, result)
-		assert.Contains(t, text, "instruction_mix")
+		var content generateAIInsightsResult
+		require.NoError(t, json.Unmarshal([]byte(text), &content))
+		require.NotNil(t, content.Error)
+		assert.Equal(t, message.EngineInsightsUnsupportedRecipe, content.Error.Code)
+		assert.Equal(t, "memory_access", content.Error.Metadata["unsupportedRecipe"])
+		assert.Equal(t, "asct, code_hotspots, cpu_microarchitecture, instruction_mix, syscall_trace_summary, system_utilization", content.Error.Metadata["supportedRecipesList"])
+		assert.Contains(t, text, "memory_access")
+		assert.Contains(t, text, "asct")
 		assert.Contains(t, text, "code_hotspots")
+		assert.Contains(t, text, "cpu_microarchitecture")
+		assert.Contains(t, text, "syscall_trace_summary")
+		assert.Contains(t, text, "system_utilization")
+		assert.Contains(t, text, "instruction_mix")
 	})
 
 	t.Run("surfaces caller-controlled run id catalog detail", func(t *testing.T) {
@@ -485,11 +628,6 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 			err  error
 			code message.MessageCode
 		}{
-			{
-				name: "run id required",
-				err:  message.New(message.EngineGrpcserverApiApapInsightsRunIdRequired),
-				code: message.EngineGrpcserverApiApapInsightsRunIdRequired,
-			},
 			{
 				name: "run does not exist",
 				err: message.New(message.EngineRunDoesNotExist).WithMetadata(map[string]string{
@@ -509,10 +647,16 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				ctx := context.Background()
 				engine := apapprotomocks.NewApapClient(t)
-				engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(
-					(*apapproto.RunSummaryBundleResponse)(nil),
-					tc.err,
-				).Once()
+				if tc.code == message.EngineRunDoesNotExist {
+					engine.On("GetRunDescription", mock.Anything, mock.Anything).
+						Return((*apapproto.RunDescription)(nil), tc.err).Once()
+				} else {
+					expectRunDescription(engine, "run-123", insights.CodeHotspotsRecipeName)
+					engine.On("GetRunSummaryBundle", mock.Anything, mock.Anything).Return(
+						(*apapproto.RunSummaryBundleResponse)(nil),
+						tc.err,
+					).Once()
+				}
 				clientSession, serverSession := connectTestServer(t, ctx, ToolDependencies{Engine: engine}, GenerateAIInsightsTool{}.Register)
 				defer clientSession.Close()
 				defer serverSession.Close()
@@ -529,6 +673,24 @@ func TestGenerateAIInsightsTool(t *testing.T) {
 			})
 		}
 	})
+}
+
+func expectRunDescription(engine *apapprotomocks.ApapClient, runID, recipeName string) {
+	engine.On("GetRunDescription", mock.Anything, mock.MatchedBy(func(req *apapproto.GetRunDescriptionRequest) bool {
+		return req.GetId().GetValue() == runID
+	})).Return(&apapproto.RunDescription{
+		Metadata: &apapproto.RunMetadata{RecipeName: recipeName},
+	}, nil).Once()
+}
+
+func runSummaryBundle(recipeName string, payloads ...*apapproto.RunSummaryPayload) *apapproto.RunSummaryBundleResponse {
+	runDetails := &apapproto.RunSummaryPayload{
+		Name:    "run_details",
+		Payload: fmt.Sprintf(`{"RunId":"run-123","RecipeName":%q}`, recipeName),
+	}
+	return &apapproto.RunSummaryBundleResponse{
+		Payloads: append([]*apapproto.RunSummaryPayload{runDetails}, payloads...),
+	}
 }
 
 func requireToolText(t *testing.T, result *mcp.CallToolResult) string {

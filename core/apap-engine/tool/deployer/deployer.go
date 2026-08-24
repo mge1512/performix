@@ -140,6 +140,36 @@ func ReconcileTool(targetType conductor.PlatformConfiguration, toolInfo tool.Too
 	return Deployed, nil
 }
 
+func createToolDeploymentDir(targetType conductor.PlatformConfiguration, rfs conductor.TargetFilesystem, path string, toolInfo tool.ToolInfo) error {
+	err := rfs.CreateDirTree(path, toolDeploymentPerm(targetType))
+	if err == nil {
+		return nil
+	}
+
+	metadata := map[string]string{
+		"toolName": toolInfo.Name,
+		"version":  toolInfo.Version,
+		"toolDir":  path,
+	}
+	msgCode := message.EngineToolDeployerCreateToolDeploymentDir
+	if errors.Is(err, iofs.ErrPermission) {
+		msgCode = message.EngineToolDeployerCreateToolDeploymentDirPermissionDenied
+	}
+	return message.New(msgCode).WithCause(err).WithMetadata(metadata)
+}
+
+func toolDeploymentPerm(targetType conductor.PlatformConfiguration) os.FileMode {
+	switch targetType.OS {
+	case conductor.Android:
+		// On Android the tool launches in the app's UID. The app must be able
+		// to traverse the deployment directory to copy the executable, but
+		// does not need permission to list its contents.
+		return perms.AndroidToolDeploymentPerm
+	default:
+		return perms.TargetToolDeploymentPerm
+	}
+}
+
 // isToolDeployed checks that the expected bundle exists (and is non-empty)
 // and that a deployment marker created after extraction is present. It does
 // not currently validate the contents of the marker against the requested
@@ -210,17 +240,9 @@ func deployTool(targetType conductor.PlatformConfiguration, toolInfo tool.ToolIn
 	}
 
 	log.Info("generating deployment directory for tool deployment ", normalisedDstDir)
-	// Ensure the tools directory is read/write/executable only by the owner.
-	err := rfs.CreateDirTree(normalisedDstDir, perms.TargetToolDeploymentPerm)
+	err := createToolDeploymentDir(targetType, rfs, normalisedDstDir, toolInfo)
 	if err != nil {
-		toolMetadata["toolDir"] = normalisedDstDir
-
-		msgCode := message.EngineToolDeployerCreateToolDeploymentDir
-		if errors.Is(err, iofs.ErrPermission) {
-			msgCode = message.EngineToolDeployerCreateToolDeploymentDirPermissionDenied
-		}
-
-		return message.New(msgCode).WithCause(err).WithMetadata(toolMetadata)
+		return err
 	}
 
 	normalisedSrcBundle := filepath.ToSlash(toolPaths.SrcBundle)
@@ -235,9 +257,21 @@ func deployTool(targetType conductor.PlatformConfiguration, toolInfo tool.ToolIn
 	log.Infof("Successfully moved file: %s to %s", normalisedSrcBundle, normalisedTargetBundle)
 
 	inflateCommand := fmt.Sprintf("tar zxf %s -C %s", normalisedTargetBundle, normalisedDstDir)
+	if targetType.OS == conductor.Win {
+		inflateCommand = fmt.Sprintf(
+			`powershell -NoProfile -NoLogo -WindowStyle Hidden -Command "$bundle = %s; Set-Location -LiteralPath ([System.IO.Path]::GetDirectoryName($bundle)); tar -zxf ([System.IO.Path]::GetFileName($bundle)) -C %s"`,
+			conductor.QuotePowershellString(normalisedTargetBundle),
+			conductor.QuotePowershellString(normalisedDstDir),
+		)
+	}
 	log.Infof(`inflating tool bundle "%s"`, inflateCommand)
-	_, _, err = cmdRunner.RunCommand(inflateCommand)
+	stdout, stderr, err := cmdRunner.RunCommand(inflateCommand)
 	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"command": inflateCommand,
+			"stdout":  stdout,
+			"stderr":  stderr,
+		}).Error("failed to inflate tool bundle")
 		toolMetadata["toolPath"] = normalisedTargetBundle
 		toolMetadata["toolDir"] = normalisedDstDir
 		return tidyUp(message.New(message.EngineToolDeployerInflateToolBundle).WithCause(err).WithMetadata(toolMetadata))

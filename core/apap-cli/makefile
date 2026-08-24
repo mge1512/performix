@@ -109,7 +109,7 @@ test:
 	@../scripts/test-all.sh
 
 # Run Robot Framework functional tests against a remote target.
-# Basic usage (skips workload-dependent and remote_localhost tests): make robot-test TARGET=<name>
+# Basic usage (skips workload-dependent and remote-localhost tests): make robot-test TARGET=<name>
 # See robot/README.md for more options and further details.
 robot-test:
 	$(if $(TARGET),,$(error TARGET is required. Usage: make robot-test TARGET=<name>))

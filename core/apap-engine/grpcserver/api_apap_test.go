@@ -77,6 +77,24 @@ func (s *testRenderStage) Execute(ctx recipe.ExecutionContext, stageContext *rec
 
 func (s *testRenderStage) Name() string { return "testRenderStage" }
 
+type testCapabilityRenderStage struct {
+	called       bool
+	capabilities run.ToolCapabilities
+}
+
+func (s *testCapabilityRenderStage) Execute(ctx recipe.ExecutionContext, stageContext *recipe.StageContext) (func(), error) {
+	capabilities, err := ctx.GetToolCapabilities(0, "a", 0)
+	if err != nil {
+		return nil, err
+	}
+
+	s.called = true
+	s.capabilities = capabilities
+	return nil, stageContext.RendererNotifier.OnRender(recipe.RenderOutput{})
+}
+
+func (s *testCapabilityRenderStage) Name() string { return "testCapabilityRenderStage" }
+
 func setupPrepareRenderServer(t *testing.T, outputFn func(renderParams map[string]any) recipe.RenderOutput) (*ApapServer, run.RunID) {
 	t.Helper()
 
@@ -92,6 +110,30 @@ func setupPrepareRenderServer(t *testing.T, outputFn func(renderParams map[strin
 				&testRenderStage{outputFn: outputFn},
 			},
 		},
+	}
+	reader.On("ReadRecipes", mock.Anything).Return(recipes, nil)
+
+	server := &ApapServer{
+		runs:         rc,
+		recipeReader: &reader,
+		recipeFinder: func(recipeName string) (*recipe.Recipe, error) {
+			recipeInfo := recipes[recipeName]
+			return &recipeInfo, nil
+		},
+		packageManager:       newTestPackageManager(t),
+		compatibilityChecker: &compatibility.ConcreteCompatibilityChecker{},
+	}
+
+	return server, runID
+}
+
+func setupPrepareRenderServerWithRecipe(t *testing.T, parsedRecipe recipe.Recipe) (*ApapServer, run.RunID) {
+	t.Helper()
+
+	rc, runID := createRunCollectionWithRun(t)
+	reader := MockRecipeReader{}
+	recipes := map[string]recipe.Recipe{
+		"cpu_microarchitecture": parsedRecipe,
 	}
 	reader.On("ReadRecipes", mock.Anything).Return(recipes, nil)
 
@@ -176,6 +218,20 @@ func TestGetVersion(t *testing.T) {
 	assert.NotEqual(t, "0.0.0-dev", version.GetVersion())
 }
 
+func TestSetAdbPath(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	runner := conductor.NewExecADBRunner("old-adb")
+	server := ApapServer{adbRunner: runner}
+
+	response, err := server.SetAdbPath(context.Background(), &apapproto.SetAdbPathRequest{Path: executable})
+
+	require.NoError(t, err)
+	assert.Equal(t, &emptypb.Empty{}, response)
+	_, _, err = runner.Run("-test.run=^$")
+	require.NoError(t, err)
+}
+
 func TestPrepareRender_WithRenderParameters(t *testing.T) {
 	rc, runID := createRunCollectionWithRun(t)
 
@@ -213,6 +269,140 @@ func TestPrepareRender_WithRenderParameters(t *testing.T) {
 	resp, err := server.PrepareRender(context.Background(), request)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+}
+
+func TestPrepareRender_ExperimentalRecipeDisabled(t *testing.T) {
+	experimentalRecipeName := "experimental_recipe"
+	server, runID := setupPrepareRenderServerWithRecipe(t, recipe.Recipe{
+		Name:   experimentalRecipeName,
+		Status: recipe.RecipeStatusExperimental,
+	})
+	server.recipeFinder = func(recipeName string) (*recipe.Recipe, error) {
+		assert.Equal(t, experimentalRecipeName, recipeName)
+		return &recipe.Recipe{Name: recipeName, Status: recipe.RecipeStatusExperimental}, nil
+	}
+
+	_, err := server.PrepareRender(context.Background(), &apapproto.PrepareRenderRequest{
+		Content: &apapproto.ContentSelection{
+			Runs: []*apapproto.RunId{{Value: runID.Value}},
+		},
+		RecipeSelectionPolicy: &apapproto.RecipeSelectionPolicyOptions{
+			Policy:       apapproto.RecipeSelectionPolicyType_OVERRIDE_BY_NAME,
+			OverrideName: &experimentalRecipeName,
+		},
+	})
+
+	expectedErr := message.New(message.EngineRecipeExperimentalDisabled).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
+	assert.Equal(t, expectedErr, err)
+	assert.NoError(t, message.ValidateMetadataPlaceholders(err))
+
+	catalogMsg, lookupErr := message.LookupMessage(err)
+	require.NoError(t, lookupErr)
+	assert.Equal(t, "The Run could not be loaded because it was generated with an experimental recipe that is not currently enabled.", catalogMsg.Message)
+}
+
+func TestPrepareRender_WithRecipeDefaultRenderParameter(t *testing.T) {
+	parser := recipeparser.RecipeParserJS{APIFactory: recipeparser.CreateConcreteAPI}
+	parsedRecipe, err := recipeparser.ParseInlineRecipe(&parser, `
+function render(context) {
+  context.setDefaultRenderParameter("mode", "automatic");
+	context.setDefaultRenderParameter("choice", "recipe-default");
+  return {
+    renderers: [{
+      type: "test_renderer",
+      id: "render",
+      config: {
+				mode: context.getRenderParameter("mode"),
+				choice: context.getRenderParameter("choice"),
+			},
+    }],
+		visualizations: [{
+			type: "test_vis",
+			id: "view",
+			rendererId: "render",
+			title: "View",
+			description: "",
+			parameterBindings: {mode: "mode", choice: "choice"},
+		}],
+  };
+}
+
+var recipe = {
+  name: "cpu_microarchitecture",
+  title: "Default render parameter test",
+  version: "1.0",
+  api_version: "1.0.0",
+  description: "Tests recipe-defined effective render parameter values.",
+  parameters: [],
+	renderParameters: [
+		{id: "mode", config: {type: "string"}},
+		{id: "choice", config: {type: "string"}},
+	],
+  readyStages: [],
+  runStages: [],
+  renderStages: [{name: "render", description: "", exec: render}],
+};
+`)
+	require.NoError(t, err)
+	server, runID := setupPrepareRenderServerWithRecipe(t, parsedRecipe)
+
+	for _, tt := range []struct {
+		name     string
+		request  map[string]*structpb.Value
+		expected string
+	}{
+		{name: "omitted", expected: "automatic"},
+		{
+			name:     "explicit null",
+			request:  map[string]*structpb.Value{"mode": structpb.NewNullValue()},
+			expected: "automatic",
+		},
+		{
+			name:     "explicit value",
+			request:  map[string]*structpb.Value{"mode": structpb.NewStringValue("manual")},
+			expected: "manual",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := server.PrepareRender(context.Background(), &apapproto.PrepareRenderRequest{
+				Content: &apapproto.ContentSelection{
+					Runs: []*apapproto.RunId{{Value: runID.Value}},
+				},
+				RenderParameters: tt.request,
+			})
+
+			require.NoError(t, err)
+			require.Len(t, resp.Renderers, 1)
+			assert.Equal(t, tt.expected, resp.Renderers[0].GetConfig().GetFields()["mode"].GetStringValue())
+			require.Contains(t, resp.RenderParameters, "mode")
+			assert.Equal(t, tt.expected, resp.RenderParameters["mode"].GetValue().GetStringValue())
+		})
+	}
+
+	t.Run("keeps explicit and mapped values authoritative on the second execution", func(t *testing.T) {
+		request := &apapproto.PrepareRenderRequest{
+			Content: &apapproto.ContentSelection{Runs: []*apapproto.RunId{{Value: runID.Value}}},
+			RenderParameters: map[string]*structpb.Value{
+				"choice": structpb.NewStringValue("explicit"),
+			},
+			VisualizationParameters: map[string]*structpb.Value{
+				"view.mode":   structpb.NewStringValue("mapped"),
+				"view.choice": structpb.NewStringValue("mapped-choice"),
+			},
+		}
+
+		first, err := server.PrepareRender(context.Background(), request)
+		require.NoError(t, err)
+		second, err := server.PrepareRender(context.Background(), request)
+		require.NoError(t, err)
+
+		config := first.Renderers[0].GetConfig().GetFields()
+		assert.Equal(t, "mapped", config["mode"].GetStringValue())
+		assert.Equal(t, "explicit", config["choice"].GetStringValue())
+		assert.Equal(t, "mapped", first.RenderParameters["mode"].GetValue().GetStringValue())
+		assert.Equal(t, "explicit", first.RenderParameters["choice"].GetValue().GetStringValue())
+		assert.Equal(t, first, second)
+	})
 }
 
 func TestPrepareRender_ConvertsStringRenderParameterNumber(t *testing.T) {
@@ -1124,6 +1314,73 @@ func TestPrepareRender_WithVisualizationParameters_RejectsVisualizationRendererI
 	assert.Equal(t, message.EngineGrpcserverApiApapRenderTopologyChanged, msg.Code())
 }
 
+func TestPrepareRender_FetchesAndAttachesCapabilities(t *testing.T) {
+	t.Run("fetches capabilities and provides them to renderer stages", func(t *testing.T) {
+		rc, runID := createRunCollectionWithRun(t)
+		capabilityComponentType := cdf.ComponentType{
+			Name:          "one-capability",
+			SchemaVersion: "1.0",
+		}
+		expectedCapability := run.ToolCapability{
+			State:         "available",
+			Payload:       map[string]any{"enabled": true},
+			ComponentType: capabilityComponentType,
+		}
+		expected := run.ToolCapabilities{
+			"one": expectedCapability,
+		}
+		capabilityRelativePath := "tool/a/0/capabilities/one.json"
+		capabilitiesDir := filepath.Join(rc.GetRunPath(runID), filepath.FromSlash("tool/a/0/capabilities"))
+		require.NoError(t, os.MkdirAll(capabilitiesDir, perms.LocalDirPerm))
+		require.NoError(t, util.WriteJSONFile(
+			filepath.Join(capabilitiesDir, "one.json"),
+			&expectedCapability,
+			perms.LocalFilePerm,
+		))
+		manifestPath := filepath.Join(rc.GetRunPath(runID), "manifest.json")
+		manifest, err := util.ReadJSONFile[cdf.Manifest](manifestPath)
+		require.NoError(t, err)
+		manifest.Entries = append(manifest.Entries, cdf.ManifestEntry{
+			Path:          capabilityRelativePath,
+			ComponentType: capabilityComponentType,
+		})
+		require.NoError(t, util.WriteJSONFileAtomic(manifestPath, manifest, perms.LocalFilePerm))
+
+		stage := &testCapabilityRenderStage{}
+		reader := MockRecipeReader{}
+		recipes := map[string]recipe.Recipe{
+			"cpu_microarchitecture": {
+				Name:         "cpu_microarchitecture",
+				RenderStages: []recipe.ScriptedStage{stage},
+			},
+		}
+		reader.On("ReadRecipes", mock.Anything).Return(recipes, nil)
+		server := &ApapServer{
+			runs:         rc,
+			recipeReader: &reader,
+			recipeFinder: func(recipeName string) (*recipe.Recipe, error) {
+				recipeInfo := recipes[recipeName]
+				return &recipeInfo, nil
+			},
+			packageManager:       newTestPackageManager(t),
+			compatibilityChecker: &compatibility.ConcreteCompatibilityChecker{},
+		}
+		request := &apapproto.PrepareRenderRequest{
+			Content: &apapproto.ContentSelection{
+				Runs: []*apapproto.RunId{{Value: runID.Value}},
+			},
+		}
+
+		response, err := server.PrepareRender(context.Background(), request)
+
+		require.NoError(t, err)
+		require.NotNil(t, response)
+		require.True(t, stage.called)
+		require.Equal(t, expected, stage.capabilities)
+		require.Equal(t, capabilityComponentType, stage.capabilities["one"].ComponentType)
+	})
+}
+
 func TestShutdown(t *testing.T) {
 	called := false
 	serverShutdown := func() { called = true }
@@ -1140,7 +1397,7 @@ func TestRecipeParameterValidation(t *testing.T) {
 	testMsgA := message.New(message.EngineRecipeparserJsRecipeStageReadinessMessage)
 	testMsgB := message.New(message.CommonUnsupportedTargetType)
 
-	t.Run("experimental recipe disabled returns not found", func(t *testing.T) {
+	t.Run("experimental recipe disabled returns dedicated error", func(t *testing.T) {
 		server := ApapServer{
 			config: ApapServerConfig{EnableExperimentalRecipes: false},
 			recipeFinder: func(recipeName string) (*recipe.Recipe, error) {
@@ -1152,7 +1409,7 @@ func TestRecipeParameterValidation(t *testing.T) {
 		_, err := server.RecipeValidateParameters(context.Background(), &apapproto.RecipeValidateParametersRequest{
 			RecipeName: experimentalRecipeName,
 		})
-		expectedErr := message.New(message.EngineRecipeDoesNotExist).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
+		expectedErr := message.New(message.EngineRecipeExperimentalDisabled).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
 		assert.Equal(t, expectedErr, err)
 		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
 	})
@@ -1187,9 +1444,25 @@ func TestRecipeParameterValidation(t *testing.T) {
 		}
 
 		_, err := server.getRecipe(experimentalRecipeName)
-		expectedErr := message.New(message.EngineRecipeDoesNotExist).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
+		expectedErr := message.New(message.EngineRecipeExperimentalDisabled).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
 		assert.Equal(t, expectedErr, err)
 		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
+	})
+
+	t.Run("getRecipe does not report a nonexistent recipe as experimental", func(t *testing.T) {
+		const missingRecipeName = "nonsenserecipe"
+		expectedErr := message.New(message.EngineRecipeDoesNotExist).WithMetadata(map[string]string{"recipe": missingRecipeName})
+		server := ApapServer{
+			config: ApapServerConfig{EnableExperimentalRecipes: false},
+			recipeFinder: func(recipeName string) (*recipe.Recipe, error) {
+				assert.Equal(t, missingRecipeName, recipeName)
+				return nil, expectedErr
+			},
+		}
+
+		_, err := server.getRecipe(missingRecipeName)
+		assert.Equal(t, expectedErr, err)
+		assert.NotErrorIs(t, err, message.New(message.EngineRecipeExperimentalDisabled))
 	})
 
 	t.Run("getRecipe allows experimental when enabled", func(t *testing.T) {
@@ -1738,7 +2011,7 @@ func TestParseRecipe(t *testing.T) {
 
 	pm := packages.NewPackageManager(executableDir, "")
 
-	t.Run("experimental recipe disabled returns not found", func(t *testing.T) {
+	t.Run("experimental recipe disabled returns dedicated error", func(t *testing.T) {
 		server := ApapServer{
 			config: ApapServerConfig{EnableExperimentalRecipes: false},
 			recipeFinder: func(recipeName string) (*recipe.Recipe, error) {
@@ -1748,7 +2021,7 @@ func TestParseRecipe(t *testing.T) {
 		}
 
 		_, err := server.ParseRecipe(context.Background(), &apapproto.ParseRecipeMessage{Name: experimentalRecipeName})
-		expectedErr := message.New(message.EngineRecipeDoesNotExist).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
+		expectedErr := message.New(message.EngineRecipeExperimentalDisabled).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
 		assert.Equal(t, expectedErr, err)
 		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
 	})
@@ -2003,7 +2276,7 @@ func TestRecipeIssueCommandDisabled(t *testing.T) {
 		},
 	}, stream)
 
-	expectedErr := message.New(message.EngineRecipeDoesNotExist).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
+	expectedErr := message.New(message.EngineRecipeExperimentalDisabled).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
 	assert.Equal(t, expectedErr, err)
 	assert.NoError(t, message.ValidateMetadataPlaceholders(err))
 }
@@ -2021,7 +2294,7 @@ func TestRecipeReadyDisabled(t *testing.T) {
 		RecipeInfo: &apapproto.RecipeStartCommand{Name: experimentalRecipeName},
 	})
 
-	expectedErr := message.New(message.EngineRecipeDoesNotExist).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
+	expectedErr := message.New(message.EngineRecipeExperimentalDisabled).WithMetadata(map[string]string{"recipe": experimentalRecipeName})
 	assert.Equal(t, expectedErr, err)
 	assert.NoError(t, message.ValidateMetadataPlaceholders(err))
 }
@@ -2040,7 +2313,7 @@ func TestRecipeReadyExperimentalAllowed(t *testing.T) {
 	})
 
 	assert.Error(t, err)
-	assert.NotErrorIs(t, err, message.New(message.EngineRecipeDoesNotExist))
+	assert.NotErrorIs(t, err, message.New(message.EngineRecipeExperimentalDisabled))
 }
 
 type fakeRecipeIssueCommandServer struct {
@@ -2054,6 +2327,67 @@ func (f *fakeRecipeIssueCommandServer) Context() context.Context             { r
 func (f *fakeRecipeIssueCommandServer) SendMsg(interface{}) error            { return nil }
 func (f *fakeRecipeIssueCommandServer) RecvMsg(interface{}) error            { return nil }
 func (f *fakeRecipeIssueCommandServer) Send(*apapproto.RecipeResponse) error { return nil }
+
+func TestAwaitRecipeJob(t *testing.T) {
+	t.Run("returns when phase 1 completes while the job continues", func(t *testing.T) {
+		done := make(chan error, 1)
+		phase1Done := make(chan struct{})
+		close(phase1Done)
+
+		jobCompleted, err := awaitRecipeJob(
+			context.Background(),
+			done,
+			phase1Done,
+			func() { t.Fatal("detached job was cancelled") },
+			true,
+		)
+
+		require.NoError(t, err)
+		assert.False(t, jobCompleted)
+	})
+
+	t.Run("returns the final job error", func(t *testing.T) {
+		for _, detachBackgroundTransfers := range []bool{false, true} {
+			t.Run(fmt.Sprintf("detach=%t", detachBackgroundTransfers), func(t *testing.T) {
+				wantErr := errors.New("recipe failed")
+				done := make(chan error, 1)
+				done <- wantErr
+
+				jobCompleted, err := awaitRecipeJob(
+					context.Background(),
+					done,
+					make(chan struct{}),
+					func() { t.Fatal("completed job was cancelled") },
+					detachBackgroundTransfers,
+				)
+
+				require.ErrorIs(t, err, wantErr)
+				assert.True(t, jobCompleted)
+			})
+		}
+	})
+
+	t.Run("cancels and waits for cleanup when the client disconnects before phase 1", func(t *testing.T) {
+		for _, detachBackgroundTransfers := range []bool{false, true} {
+			t.Run(fmt.Sprintf("detach=%t", detachBackgroundTransfers), func(t *testing.T) {
+				ctx, cancelCtx := context.WithCancel(context.Background())
+				cancelCtx()
+				done := make(chan error, 1)
+				cancelled := false
+
+				jobCompleted, err := awaitRecipeJob(ctx, done, make(chan struct{}), func() {
+					cancelled = true
+					done <- context.Canceled
+				}, detachBackgroundTransfers)
+
+				require.ErrorIs(t, err, context.Canceled)
+				assert.False(t, jobCompleted)
+				assert.True(t, cancelled)
+				assert.Empty(t, done)
+			})
+		}
+	})
+}
 
 func TestRecipeIssueCommandCancelAndStop(t *testing.T) {
 	tests := []struct {
@@ -2150,7 +2484,7 @@ func createRunCollection(t *testing.T) (*run.RunCollection, run.RunID) {
 		"select1":   []string{"selA", "selB"},
 	}, rec.Parameters, "test-recipe")
 	require.NoError(t, err)
-	runId, release, err := creator.CreateRun(context.Background(), runs, &rc)
+	runId, release, err := creator.CreateRun(context.Background(), runs, &rc, nil)
 	require.NoError(t, err)
 	require.NotNil(t, release)
 	t.Cleanup(func() { _ = release() })
@@ -2283,6 +2617,64 @@ func TestLookupMessage(t *testing.T) {
 
 		assert.Nil(t, err)
 		assert.Equal(t, expectedRsp, rsp)
+	})
+}
+
+func TestMarshalInvokeRenderResponse(t *testing.T) {
+	t.Run("resolves catalog message invocation errors", func(t *testing.T) {
+		request := &apapproto.InvokeRenderRequest{
+			RendererConfig: []*apapproto.RendererConfig{
+				{
+					Renderer: "dependent_renderer",
+					Id:       &apapproto.RendererId{Value: "dependent-renderer-id"},
+				},
+			},
+		}
+		cause := message.New(message.EngineRunDoesNotExist).WithMetadata(map[string]string{"runID": "upstream-run"})
+		invocationErr := message.New(message.EngineRenderRendererspecRendererDependencyFailed).
+			WithMetadata(map[string]string{
+				"type":           "dependent_renderer",
+				"id":             "dependent-renderer-id",
+				"dependencyType": "upstream_renderer",
+				"dependencyId":   "upstream-renderer-id",
+			}).
+			WithCause(cause)
+		expectedMsg, err := message.LookupMessage(invocationErr)
+		require.NoError(t, err)
+		expectedCauseMsg, err := message.LookupMessage(cause)
+		require.NoError(t, err)
+
+		response, err := marshalInvokeRenderResponse(request, nil, []error{invocationErr})
+		require.NoError(t, err)
+		require.Len(t, response.InvocationStatuses, 1)
+
+		statusErr := response.InvocationStatuses[0].GetError()
+		require.NotNil(t, statusErr)
+		assert.Contains(t, statusErr.Message, expectedMsg.Text())
+		assert.Contains(t, statusErr.Message, "dependent_renderer")
+		assert.Contains(t, statusErr.Message, "upstream_renderer")
+		assert.Contains(t, statusErr.Message, expectedCauseMsg.Text())
+		assert.NotContains(t, statusErr.Message, "engine.render.rendererspec.RENDERER_DEPENDENCY_FAILED")
+		assert.NotContains(t, statusErr.Message, "engine.run.DOES_NOT_EXIST")
+	})
+
+	t.Run("keeps raw text for non catalog invocation errors", func(t *testing.T) {
+		request := &apapproto.InvokeRenderRequest{
+			RendererConfig: []*apapproto.RendererConfig{
+				{
+					Renderer: "failing_renderer",
+					Id:       &apapproto.RendererId{Value: "failing-renderer-id"},
+				},
+			},
+		}
+
+		response, err := marshalInvokeRenderResponse(request, nil, []error{errors.New("plain renderer failure")})
+		require.NoError(t, err)
+		require.Len(t, response.InvocationStatuses, 1)
+
+		statusErr := response.InvocationStatuses[0].GetError()
+		require.NotNil(t, statusErr)
+		assert.Equal(t, "plain renderer failure", statusErr.Message)
 	})
 }
 
@@ -2776,6 +3168,7 @@ func TestBuildSupportPackageConfigIncludesAllFields(t *testing.T) {
 		"deployment-tools-dir":        "/opt/apap/tools/deployed",
 		"source-tools-dir":            "/opt/apap/tools/src",
 		"config-dir":                  "/etc/apap",
+		"adb-path":                    "",
 	}
 
 	require.Equal(t, expected, server.buildSupportPackageConfig())

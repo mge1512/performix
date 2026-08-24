@@ -5,6 +5,8 @@ package daemon
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -12,6 +14,7 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-cli/cmd/grouping"
 	"github.com/Arm-Debug/apap-cli/apap-cli/service/client"
 	"github.com/Arm-Debug/apap-cli/apap-cli/service/server"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/terminology"
 	"github.com/Arm-Debug/apap-cli/clients/go/apapproto"
 )
@@ -64,6 +67,11 @@ func newDaemonStopCmd(cc clientConnector, ss serverShutter) *cobra.Command {
 			}
 
 			if err != nil {
+				if daemonNotResponsive(err) {
+					return message.New(message.CliCmdDaemonStopNoResponsiveDaemon).WithMetadata(map[string]string{
+						"serverAddress": net.JoinHostPort(host, strconv.Itoa(port)),
+					})
+				}
 				return err
 			}
 
@@ -75,4 +83,9 @@ func newDaemonStopCmd(cc clientConnector, ss serverShutter) *cobra.Command {
 	daemonStopCmd.Flags().BoolVarP(&force, "force", "f", defaultForce, "Kill the daemon, interrupting all current RPCs rather than waiting for them to finish.")
 
 	return daemonStopCmd
+}
+
+func daemonNotResponsive(err error) bool {
+	msg := message.IsMessage(err)
+	return msg != nil && msg.Code() == message.EngineGrpcconnectionServerDidNotRespond
 }

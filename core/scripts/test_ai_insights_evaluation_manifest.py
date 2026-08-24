@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -18,6 +22,14 @@ EVALUATION_SPEC = importlib.util.spec_from_file_location(
 evaluation = importlib.util.module_from_spec(EVALUATION_SPEC)
 sys.modules[EVALUATION_SPEC.name] = evaluation
 EVALUATION_SPEC.loader.exec_module(evaluation)
+
+CONFTEST_SPEC = importlib.util.spec_from_file_location(
+    "ai_insights_evaluation_conftest_test_module",
+    HARNESS_DIR / "conftest.py",
+)
+conftest = importlib.util.module_from_spec(CONFTEST_SPEC)
+sys.modules[CONFTEST_SPEC.name] = conftest
+CONFTEST_SPEC.loader.exec_module(conftest)
 
 REST_MODE_SPEC = importlib.util.spec_from_file_location(
     "ai_insights_rest_mode_test_module",
@@ -41,10 +53,48 @@ class FakePytestConfig:
         raise AssertionError(f"unexpected option: {option}")
 
 
+class FakeXdistConfig:
+    def __init__(self, manifest_path: Path):
+        self.option = SimpleNamespace(collectonly=False)
+        self.manifest_path = manifest_path
+
+    def getoption(self, option: str):
+        if option == "--ai-manifest":
+            return str(self.manifest_path)
+        raise AssertionError(f"unexpected option: {option}")
+
+
+class FakeXdistNode:
+    def __init__(self, config: FakeXdistConfig):
+        self.config = config
+
+
+def selected_testcases_from_nodeids(manifest_tests: list[dict], nodeids: list[str]):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = Path(tmpdir) / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "defaults": {"prerecord": {"mode": "launch"}},
+                    "tests": manifest_tests,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return conftest._selected_testcases_from_nodeids(
+            FakeXdistConfig(manifest_path),
+            nodeids,
+        )
+
+
 class AiInsightsManifestSelectionTests(unittest.TestCase):
     def test_iter_manifest_parameters_returns_selected_valid_act(self):
         manifest = {
-            "defaults": {"modes": ["hackathon_mcp"]},
+            "defaults": {
+                "modes": ["hackathon_mcp"],
+                "recipe": "code_hotspots",
+                "prerecord": {"mode": "launch"},
+            },
             "tests": [
                 {
                     "id": "test_case_01",
@@ -65,6 +115,7 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
 
     def test_iter_manifest_parameters_uses_requested_modes_for_each_testcase(self):
         manifest = {
+            "defaults": {"recipe": "code_hotspots", "prerecord": {"mode": "launch"}},
             "tests": [
                 {
                     "id": "test_case_01",
@@ -76,6 +127,76 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
         params = evaluation.iter_manifest_parameters(FakePytestConfig("act2", "rest,hackathon_mcp"), manifest)
 
         self.assertEqual(["rest", "hackathon_mcp"], [param["mode"] for param in params])
+
+    def test_iter_manifest_parameters_selects_modes_supported_by_each_recipe(self):
+        manifest = {
+            "defaults": {"recipe": "code_hotspots", "prerecord": {"mode": "launch"}},
+            "tests": [
+                {
+                    "id": "test_case_01",
+                    "acts": ["act2"],
+                },
+                {
+                    "id": "test_case_32",
+                    "acts": ["act2"],
+                    "recipe": "system_utilization",
+                },
+                {
+                    "id": "test_case_41",
+                    "acts": ["act2"],
+                    "recipe": "syscall_trace_summary",
+                },
+                {
+                    "id": "test_case_46",
+                    "acts": ["act2"],
+                    "recipe": "cpu_microarchitecture",
+                },
+            ],
+        }
+
+        params = evaluation.iter_manifest_parameters(
+            FakePytestConfig("act2", "rest,hackathon_mcp,performix_mcp"),
+            manifest,
+        )
+
+        self.assertEqual(
+            [
+                ("test_case_01", "code_hotspots", "rest"),
+                ("test_case_01", "code_hotspots", "hackathon_mcp"),
+                ("test_case_01", "code_hotspots", "performix_mcp"),
+                ("test_case_32", "system_utilization", "performix_mcp"),
+                ("test_case_41", "syscall_trace_summary", "performix_mcp"),
+                ("test_case_46", "cpu_microarchitecture", "performix_mcp"),
+            ],
+            [
+                (
+                    param["test_case"]["id"],
+                    param["test_case"]["recipe"],
+                    param["mode"],
+                )
+                for param in params
+            ],
+        )
+
+    def test_iter_manifest_parameters_rejects_unsupported_recipe(self):
+        manifest = {
+            "tests": [
+                {
+                    "id": "test_case_01",
+                    "acts": ["act2"],
+                    "recipe": "memory_access",
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "unknown or unsupported recipe type",
+        ):
+            evaluation.iter_manifest_parameters(
+                FakePytestConfig("act2", "performix_mcp"),
+                manifest,
+            )
 
     def test_iter_manifest_parameters_rejects_unknown_act(self):
         manifest = {
@@ -93,6 +214,203 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("Unknown AI Insights act selection: act2", message)
         self.assertIn("Available acts: act1", message)
+
+
+class AiInsightsPromptTests(unittest.TestCase):
+    def test_resolve_mcp_prompt_uses_generic_prompt_by_default(self):
+        prompt = evaluation.resolve_mcp_prompt(
+            {"id": "test_case_01"},
+            "imported-run-id",
+        )
+
+        self.assertEqual(
+            "Show me AI Insights for Performix run imported-run-id. Use Markdown.\n",
+            prompt,
+        )
+
+    def test_resolve_mcp_prompt_uses_testcase_prompt(self):
+        prompt = evaluation.resolve_mcp_prompt(
+            {
+                "id": "test_case_01",
+                "mcp_prompt": "Why is run {run_id} spending time in this function?",
+            },
+            "imported-run-id",
+        )
+
+        self.assertEqual(
+            "Why is run imported-run-id spending time in this function?\n",
+            prompt,
+        )
+
+    def test_resolve_mcp_prompt_rejects_empty_prompt(self):
+        with self.assertRaisesRegex(ValueError, "mcp_prompt must be a non-empty string"):
+            evaluation.resolve_mcp_prompt(
+                {"id": "test_case_01", "mcp_prompt": "  "},
+                "imported-run-id",
+            )
+
+    def test_resolve_mcp_prompt_allows_prompt_without_run_id_placeholder(self):
+        prompt = evaluation.resolve_mcp_prompt(
+            {"id": "test_case_01", "mcp_prompt": "Show me the latest run."},
+            "imported-run-id",
+        )
+
+        self.assertEqual("Show me the latest run.\n", prompt)
+
+
+class AiInsightsPreRecordedInputTests(unittest.TestCase):
+    def test_selected_testcases_from_xdist_nodeids_deduplicates_modes(self):
+        testcases = selected_testcases_from_nodeids(
+            [
+                {
+                    "id": "case-alpha",
+                    "recipe": "code_hotspots",
+                    "run_artifact": "case-alpha/latest.zip",
+                },
+                {
+                    "id": "test_case_27",
+                    "recipe": "code_hotspots",
+                    "run_artifact": "test_case_27/latest.zip",
+                },
+            ],
+            [
+                "test_ai_insights_evaluation.py::test_ai_insights[case-alpha-summary-rest-attempt_001]",
+                "test_ai_insights_evaluation.py::test_ai_insights[case-alpha-summary-hackathon_mcp-attempt_001]",
+                "test_ai_insights_evaluation.py::test_ai_insights[test_case_27-summary-rest-attempt_001]",
+            ],
+        )
+
+        self.assertEqual(
+            ["case-alpha", "test_case_27"],
+            [test_case["id"] for test_case in testcases],
+        )
+
+    def test_selected_testcases_from_xdist_nodeids_rejects_unmapped_testcase(self):
+        with self.assertRaises(pytest.UsageError) as ctx:
+            selected_testcases_from_nodeids(
+                [
+                    {
+                        "id": "test_case_26",
+                        "recipe": "code_hotspots",
+                        "run_artifact": "test_case_26/latest.zip",
+                    }
+                ],
+                [
+                    "test_ai_insights_evaluation.py::test_ai_insights[unknown-summary-rest-attempt_001]",
+                ],
+            )
+
+        self.assertIn("Could not map AI Insights pytest node ID", str(ctx.exception))
+        self.assertIn("unknown-summary-rest-attempt_001", str(ctx.exception))
+
+    def test_xdist_collection_prepares_once_from_worker_collection(self):
+        nodeids = [
+            "test_ai_insights_evaluation.py::test_ai_insights[test_case_26-summary-rest-attempt_001]",
+            "test_ai_insights_evaluation.py::test_ai_insights[test_case_26-summary-performix_mcp-attempt_001]",
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "defaults": {"prerecord": {"mode": "launch"}},
+                        "tests": [
+                            {
+                                "id": "test_case_26",
+                                "recipe": "code_hotspots",
+                                "run_artifact": "test_case_26/latest.zip",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = FakeXdistConfig(manifest_path)
+            prepared = []
+
+            with mock.patch.object(
+                conftest,
+                "_prepare_selected_testcases",
+                side_effect=lambda _config, testcases: prepared.append(
+                    [test_case["id"] for test_case in testcases]
+                ),
+            ):
+                conftest.pytest_xdist_node_collection_finished(
+                    FakeXdistNode(config),
+                    nodeids,
+                )
+                conftest.pytest_xdist_node_collection_finished(
+                    FakeXdistNode(config),
+                    nodeids,
+                )
+                conftest.pytest_xdist_node_collection_finished(
+                    FakeXdistNode(config),
+                    nodeids,
+                )
+
+        self.assertEqual([["test_case_26"]], prepared)
+
+    def test_download_missing_run_artifacts_raises_for_artifactory_misses(self):
+        lines = []
+        calls = []
+
+        def write_line(line: str, **markup):
+            lines.append((line, markup))
+
+        def fail_download(
+            artifactory_run_base,
+            test_id,
+            filename,
+            destination_dir,
+            destination_name,
+            required=True,
+        ):
+            calls.append((filename, required))
+            raise pytest.UsageError("download failed")
+
+        testcases = [
+            {
+                "id": "test_case_26",
+                "recipe": "code_hotspots",
+                "run_artifact": "test_case_26/latest.zip",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(conftest, "_download_artifactory_input", side_effect=fail_download):
+                with self.assertRaises(pytest.UsageError):
+                    conftest._download_missing_run_artifacts(
+                        testcases,
+                        Path(tmpdir),
+                        "its.apx-prerecorded-runs/ai-insights-evaluation",
+                        write_line,
+                    )
+
+        self.assertEqual([("latest.zip", True)], calls)
+        self.assertTrue(any("test_case_26: latest.zip" in line for line, _ in lines))
+        self.assertFalse(any("WARNING" in line for line, _ in lines))
+
+    def test_prepare_run_inputs_raises_for_missing_local_inputs(self):
+        testcases = [
+            {
+                "id": "test_case_26",
+                "recipe": "code_hotspots",
+                "run_artifact": "test_case_26/latest.zip",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir, self.assertRaisesRegex(
+            pytest.UsageError,
+            "(?s)test_case_26 run archive.*test_case_26 source archive",
+        ):
+            conftest._prepare_run_inputs(
+                testcases,
+                Path(tmpdir),
+                "",
+                Path(tmpdir) / "results",
+                lambda _line: None,
+            )
 
 
 class AiInsightsExpectedFailureTests(unittest.TestCase):

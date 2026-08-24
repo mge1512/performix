@@ -24,7 +24,7 @@ const tools = "tools"
 //   - Windows: uses an explicit baseDir when provided (supports ~ via USERPROFILE and relative paths, checks existence/writability),
 //     otherwise uses LOCALAPPDATA/<product>/tools; no fallback.
 //   - Android: uses an explicit baseDir when provided, otherwise uses /data/local/tmp/<product>/tools.
-func ResolveToolsBaseDir(baseDir string, platformOS OS, cmdRunner CommandRunner) (string, error) {
+func ResolveToolsBaseDir(baseDir string, platformOS OS, cmdRunner CommandRunner, localityName string) (string, error) {
 	switch platformOS {
 	case Linux, Darwin:
 		return resolve(baseDir, cmdRunner, resolverOps{
@@ -41,9 +41,10 @@ func ResolveToolsBaseDir(baseDir string, platformOS OS, cmdRunner CommandRunner)
 				return agentconfig.GetDefaultLockRootDirectory(runtime.GOOS)
 			},
 			errRootMissing: func(base string) error {
-				return message.New(message.EngineToolTargetPathTargetHomeUnavailable).WithMetadata(map[string]string{"path": base})
+				return message.New(message.EngineToolTargetPathTargetHomeUnavailable).WithMetadata(map[string]string{"path": base, "locality": localityName})
 			},
-			isWindows: false,
+			isWindows:    false,
+			localityName: localityName,
 		})
 	case Win:
 		readRoot := readWindowsLocalAppData
@@ -64,9 +65,10 @@ func ResolveToolsBaseDir(baseDir string, platformOS OS, cmdRunner CommandRunner)
 				return agentconfig.GetDefaultLockRootDirectory(runtime.GOOS)
 			},
 			errRootMissing: func(_ string) error {
-				return message.New(message.EngineToolTargetPathWinLocalappdataUnavailable)
+				return message.New(message.EngineToolTargetPathWinLocalappdataUnavailable).WithMetadata(map[string]string{"locality": localityName})
 			},
-			isWindows: true,
+			isWindows:    true,
+			localityName: localityName,
 		})
 	case Android:
 		return resolve(baseDir, cmdRunner, resolverOps{
@@ -85,9 +87,10 @@ func ResolveToolsBaseDir(baseDir string, platformOS OS, cmdRunner CommandRunner)
 				return agentconfig.GetDefaultLockRootDirectory(runtime.GOOS)
 			},
 			errRootMissing: func(base string) error {
-				return message.New(message.EngineToolTargetPathTargetHomeUnavailable).WithMetadata(map[string]string{"path": base})
+				return message.New(message.EngineToolTargetPathTargetHomeUnavailable).WithMetadata(map[string]string{"path": base, "locality": localityName})
 			},
-			isWindows: false,
+			isWindows:    false,
+			localityName: localityName,
 		})
 	default:
 		return baseDir, nil
@@ -105,6 +108,7 @@ type resolverOps struct {
 	lockRoot       func() string
 	errRootMissing func(base string) error
 	isWindows      bool
+	localityName   string
 }
 
 func resolve(baseDir string, cmdRunner CommandRunner, ops resolverOps) (string, error) {
@@ -125,7 +129,7 @@ func resolve(baseDir string, cmdRunner CommandRunner, ops resolverOps) (string, 
 	lockRoot := normalizeForCompare(ops.isWindows, ops.lockRoot())
 	normalisedBase := normalizeForCompare(ops.isWindows, base)
 	if normalisedBase == lockRoot {
-		return "", message.New("engine.tool.target_path.LOCK_DIR_CONFLICT").WithMetadata(map[string]string{"path": base})
+		return "", message.New(message.EngineToolTargetPathLockDirConflict).WithMetadata(map[string]string{"path": base, "locality": ops.localityName})
 	}
 
 	exists, err := ops.exists(cmdRunner, base)
@@ -133,7 +137,7 @@ func resolve(baseDir string, cmdRunner CommandRunner, ops resolverOps) (string, 
 		return "", err
 	}
 	if !exists {
-		return "", message.New(message.EngineToolTargetPathDirMissing).WithMetadata(map[string]string{"path": base})
+		return "", message.New(message.EngineToolTargetPathDirMissing).WithMetadata(map[string]string{"path": base, "locality": ops.localityName})
 	}
 
 	ok, err := ops.writable(cmdRunner, base)
@@ -141,7 +145,7 @@ func resolve(baseDir string, cmdRunner CommandRunner, ops resolverOps) (string, 
 		return "", err
 	}
 	if !ok {
-		return "", message.New(message.EngineToolTargetPathNoWritableToolsPath).WithMetadata(map[string]string{"path": base})
+		return "", message.New(message.EngineToolTargetPathNoWritableToolsPath).WithMetadata(map[string]string{"path": base, "locality": ops.localityName})
 	}
 
 	if baseDir == "" && ops.defaultBase != nil {
@@ -235,7 +239,7 @@ func readPosixHome(cmdRunner CommandRunner) (home string, err error) {
 
 // readWindowsHome fetches %USERPROFILE% from the target.
 func readWindowsHome(cmdRunner CommandRunner) (home string, err error) {
-	userprofileOut, _, userprofileErr := cmdRunner.RunCommand("powershell -NoLogo -WindowStyle Hidden -Command \"echo $env:USERPROFILE\"")
+	userprofileOut, _, userprofileErr := cmdRunner.RunCommand(`powershell -NoProfile -NoLogo -WindowStyle Hidden -Command "echo $env:USERPROFILE"`)
 	if userprofileErr != nil {
 		return "", userprofileErr
 	}
@@ -253,7 +257,7 @@ func checkPosixWritable(cmdRunner CommandRunner, path string) (bool, error) {
 
 // readWindowsLocalAppData fetches LOCALAPPDATA from the target.
 func readWindowsLocalAppData(cmdRunner CommandRunner) (localAppData string, err error) {
-	stdout, _, envErr := cmdRunner.RunCommand(`powershell -NoLogo -WindowStyle Hidden -Command "echo $env:LOCALAPPDATA"`)
+	stdout, _, envErr := cmdRunner.RunCommand(`powershell -NoProfile -NoLogo -WindowStyle Hidden -Command "echo $env:LOCALAPPDATA"`)
 	localAppData = strings.TrimSpace(strings.ReplaceAll(stdout, `\`, `/`))
 	if localAppData == "" && envErr != nil {
 		return "", envErr
@@ -263,7 +267,7 @@ func readWindowsLocalAppData(cmdRunner CommandRunner) (localAppData string, err 
 
 // readWindowsUserProfile fetches USERPROFILE from the target.
 func readWindowsUserProfile(cmdRunner CommandRunner) (userProfile string, err error) {
-	stdout, _, envErr := cmdRunner.RunCommand(`powershell -NoLogo -WindowStyle Hidden -Command "echo $env:USERPROFILE"`)
+	stdout, _, envErr := cmdRunner.RunCommand(`powershell -NoProfile -NoLogo -WindowStyle Hidden -Command "echo $env:USERPROFILE"`)
 	userProfile = util.ForceToSlash(strings.TrimSpace(stdout))
 	if userProfile == "" && envErr != nil {
 		return "", envErr
@@ -273,7 +277,7 @@ func readWindowsUserProfile(cmdRunner CommandRunner) (userProfile string, err er
 
 // checkWindowsWritable attempts a temporary write under the provided Windows path on the target.
 func checkWindowsWritable(cmdRunner CommandRunner, path string) (bool, error) {
-	script := fmt.Sprintf(`powershell -NoLogo -WindowStyle Hidden -Command "$p = '%s'; $tmp = Join-Path $p '%v-writecheck.tmp'; try { Set-Content -Path $tmp -Value '' -ErrorAction Stop; Remove-Item $tmp -Force; exit 0 } catch { exit 1 }"`, path, terminology.GetProductBinaryName())
+	script := fmt.Sprintf(`powershell -NoProfile -NoLogo -WindowStyle Hidden -Command "$p = '%s'; $tmp = Join-Path $p '%v-writecheck.tmp'; try { Set-Content -Path $tmp -Value '' -ErrorAction Stop; Remove-Item $tmp -Force; exit 0 } catch { exit 1 }"`, path, terminology.GetProductBinaryName())
 	_, _, err := cmdRunner.RunCommand(script)
 	if err != nil {
 		return false, nil
@@ -290,7 +294,7 @@ func posixPathExists(cmdRunner CommandRunner, path string) (bool, error) {
 }
 
 func windowsPathExists(cmdRunner CommandRunner, path string) (bool, error) {
-	script := fmt.Sprintf(`powershell -NoLogo -WindowStyle Hidden -Command "if (Test-Path '%s') { exit 0 } else { exit 1 }"`, path)
+	script := fmt.Sprintf(`powershell -NoProfile -NoLogo -WindowStyle Hidden -Command "if (Test-Path '%s') { exit 0 } else { exit 1 }"`, path)
 	_, _, err := cmdRunner.RunCommand(script)
 	if err != nil {
 		return false, nil

@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright 2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
-SPDX-License-Identifier: Apache-2.0
--->
-
 # Performix MCP Usage
 
 ## Terminology & Core Concepts
@@ -45,7 +40,7 @@ The following table provides guidance for common recipes. It is not an exhaustiv
 | Recipe | Usage guidance |
 | --- | --- |
 | `system_utilization` | Use this as the default for system-level profiling when the user has not identified a more specific measurement goal. It shows how CPU, memory, disk and network resources are used over time, helping identify saturated resources and correlate workload behaviour with broader system activity. |
-| `code_hotspots` | Use this as the default for general CPU profiling when the user has not identified a more specific measurement goal. It is the fastest way to answer "what code is spending CPU time?" and is currently the only recipe that supports Dynamic Insights. |
+| `code_hotspots` | Use this as the default for general CPU profiling when the user has not identified a more specific measurement goal. It is the fastest way to answer "what code is spending CPU time?" |
 | `cpu_microarchitecture` | Use this when the user wants to understand microarchitectural bottlenecks. It is often a useful follow-up when hot code is underperforming. |
 | `memory_access` | Use this when the workload looks memory-bound or when code hotspots suggest cache or latency issues. |
 | `instruction_mix` | Use this when you need a breakdown of instruction categories, compiler output, or ISA usage. |
@@ -67,6 +62,17 @@ Unless `recipe_info` returns different MCP guidance, omit the timeout for initia
 
 
 ### Generating Insights
-Dynamic Insights are available only for successful runs produced by a supported recipe, currently `code_hotspots`. This limitation applies to Dynamic Insights, not to `run_recipe`; continue to use other recipes when they better match the user's profiling goal.
+Dynamic Insights are available only for successful runs produced by a supported recipe. Supported recipes are:
+
+- `asct`
+- `code_hotspots`
+- `cpu_microarchitecture`
+- `instruction_mix`
+- `syscall_trace_summary`
+- `system_utilization`
+
+This limitation applies to Dynamic Insights, not to `run_recipe`; continue to use other recipes when they better match the user's profiling goal.
 
 Use `list_runs` to find a suitable existing successful run when the user has not supplied a run ID. Call `generate_ai_insights` with that run ID. If any returned payload is incomplete, use its bundle ID, payload name and `next_offset` with `read_ai_insights_payload_details`, repeating as needed until the relevant evidence is complete.
+
+The `run_query` tool provides advanced SELECT access to rendered run data. Use it when recipe-specific guidance requests direct querying, or when the user explicitly asks to query a run.

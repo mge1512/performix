@@ -19,6 +19,7 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
 	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
+	"github.com/Arm-Debug/apap-cli/apap-engine/mocks"
 	"github.com/Arm-Debug/apap-cli/apap-engine/parameters"
 	"github.com/Arm-Debug/apap-cli/apap-engine/perms"
 	"github.com/Arm-Debug/apap-cli/apap-engine/run"
@@ -110,29 +111,20 @@ func TestConfigureRunCreatorRunBuilder_AddsComponents(t *testing.T) {
 					},
 				},
 			},
-			TargetPIDCollectorOutput: util.Named[CollectorOutput]{
-				Name: "target-pid",
-				Value: CollectorOutput{
-					Filename:      "pid.json",
-					ComponentType: cdf.ComponentType{Name: "target-pid", SchemaVersion: "1.0"},
-				},
-			},
 		},
 	}
 
 	// Call the method under test
 	require.NoError(t, creator.ConfigureCollectorRunBuilder(rc))
 
-	// Two TargetCollector outputs + one PID output
+	// Two TargetCollector outputs
 	assert.Len(t, creator.TargetInfoCollector.TargetCollectionPath, 2)
-	assert.NotEmpty(t, creator.TargetInfoCollector.TargetPIDCollectionPath)
 
 	// Paths should be underneath the run directory
 	for _, p := range creator.TargetInfoCollector.TargetCollectionPath {
 		assert.True(t, strings.HasSuffix(p, filepath.Join("collector", "target-info")) ||
 			strings.Contains(p, "info.json") || strings.Contains(p, "extra.json"))
 	}
-	assert.True(t, strings.HasSuffix(creator.TargetInfoCollector.TargetPIDCollectionPath, filepath.Join("collector", "target-pid", "pid.json")))
 }
 
 func TestQueueFileRetrieval_Success(t *testing.T) {
@@ -348,13 +340,6 @@ func TestCreateRun_HappyPath(t *testing.T) {
 				Name:  "target-info",
 				Value: nil, // keep small
 			},
-			TargetPIDCollectorOutput: util.Named[CollectorOutput]{
-				Name: "target-pid",
-				Value: CollectorOutput{
-					Filename:      "pid.json",
-					ComponentType: cdf.ComponentType{Name: "target-pid"},
-				},
-			},
 		},
 	}
 
@@ -429,7 +414,7 @@ func TestCreateRun_HappyPath(t *testing.T) {
 	for _, wl := range wls {
 		t.Run(fmt.Sprintf("creates metadata correctly for %v", wl.name), func(t *testing.T) {
 			rctx.OrigWorkload = wl.wl
-			runID, release, err := creator.CreateRun(context.Background(), rc, rctx)
+			runID, release, err := creator.CreateRun(context.Background(), rc, rctx, nil)
 			require.NoError(t, err)
 			require.NotNil(t, release)
 			t.Cleanup(func() { _ = release() })
@@ -504,7 +489,7 @@ func TestCreateRun_ErrorProducedIfRecipeNotFound(t *testing.T) {
 	runCollection, err := run.NewRunCollection(baseDir)
 	assert.NoError(t, err)
 
-	_, release, err := creator.CreateRun(context.Background(), runCollection, &recipeCtx)
+	_, release, err := creator.CreateRun(context.Background(), runCollection, &recipeCtx, nil)
 	require.Error(t, err)
 	require.Nil(t, release)
 
@@ -513,6 +498,47 @@ func TestCreateRun_ErrorProducedIfRecipeNotFound(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, message.EngineConductorFileTransferOpenSrcFile, msgErr.Code())
 	assert.Equal(t, filepath.ToSlash(recipeCtx.RecipePath), msgErr.Metadata()["srcFilePath"])
+}
+
+func TestCreateRun_BindsMetadataUpdateNotifier(t *testing.T) {
+	baseDir := t.TempDir()
+	runCollection, err := run.NewRunCollection(filepath.Join(baseDir, "runs"))
+	require.NoError(t, err)
+
+	recipePath := filepath.Join(baseDir, "recipe.yaml")
+	require.NoError(t, os.WriteFile(recipePath, []byte("name: test-recipe"), perms.LocalFilePerm))
+
+	creator := &CollectionState{
+		TargetInfoCollector: TargetInfoCollector{
+			TargetCollectorOutput: util.Named[[]CollectorOutput]{
+				Name: "target-pid",
+				Value: []CollectorOutput{
+					{
+						Filename:      "pid.json",
+						ComponentType: cdf.ComponentType{Name: "target-pid"},
+					},
+				},
+			},
+		},
+	}
+	notifier := &mocks.MockStageNotifier{}
+	notifier.On("OnRunMetadataChanged", run.RunMetadataUpdateReasonSupportsStop).Once()
+
+	runID, release, err := creator.CreateRun(context.Background(), runCollection, &RecipeCtx{
+		RecipePath: recipePath,
+		Target:     &target.LocalTarget{},
+		RecipeMetadata: RecipeMetadata{
+			Name:       "test-recipe",
+			Version:    "1.0.0",
+			APIVersion: "1.0.0",
+		},
+	}, notifier)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, release()) })
+
+	require.NotEqual(t, run.InvalidRunID, runID)
+	require.NoError(t, creator.RunMetadataUpdater.AccumulateSupportsStop(context.Background(), false))
+	notifier.AssertExpectations(t)
 }
 
 func TestRecipeFileCollector_AddComponent_Success(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
 	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
 	"github.com/Arm-Debug/apap-cli/apap-engine/deploymentsupport"
+	"github.com/Arm-Debug/apap-cli/apap-engine/locality"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	run_mocks "github.com/Arm-Debug/apap-cli/apap-engine/run/mocks"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool"
@@ -106,12 +107,84 @@ func integrationContext(engine tool.Engine, ic *tool.IntegrationContext) *tool.I
 	ic.Ctx = context.Background()
 	ic.DefaultEngineLocality = tool.EngineLocality{Engine: engine, ToolsRoot: "/target/tools"}
 	ic.ResolveLocality = func(name string) (tool.EngineLocality, error) {
-		if name != "target" {
+		if name != locality.Target {
 			return tool.EngineLocality{}, errors.New("unsupported locality")
 		}
 		return tool.EngineLocality{Engine: engine, FileCollector: ic.DefaultEngineLocality.FileCollector, ToolsRoot: "/target/tools"}, nil
 	}
 	return ic
+}
+
+func TestCollectionFinishedNotification(t *testing.T) {
+	t.Run("Legacy integration does not report collection finished", func(t *testing.T) {
+		ti, err := LoadFromSourceNoError(t, ToolSource).NewIntegration(
+			integrationContext(&tool.AgentEngine{}, nil),
+		)
+		require.NoError(t, err)
+		assert.Nil(t, ti.CollectionFinished())
+	})
+
+	t.Run("Opted-in integration notifies the runner through engine", func(t *testing.T) {
+		source := ToolSourceBegin + `
+		reportsCollectionFinished: true,
+		run: (engine, ctx) => {
+			engine.notifyCollectionFinished();
+			engine.notifyCollectionFinished();
+		},
+		` + ToolSourceEnd
+		ti, err := LoadFromSourceNoError(t, source).NewIntegration(
+			integrationContext(&tool.AgentEngine{}, nil),
+		)
+		require.NoError(t, err)
+
+		select {
+		case <-ti.CollectionFinished():
+			require.Fail(t, "collection finished before the integration notified the runner")
+		default:
+		}
+
+		cleanup, err := ti.StartRuntime()
+		require.NoError(t, err)
+		defer cleanup()
+		require.NoError(t, ti.Run())
+
+		select {
+		case <-ti.CollectionFinished():
+		default:
+			require.Fail(t, "collection notification was not forwarded to the runner")
+		}
+	})
+}
+
+func TestToolContextMetadataPreservesJavaScriptObjectIdentity(t *testing.T) {
+	source := ToolSourceBegin + `
+		run: async (engine, ctx) => {
+			const processState = { handle: "running" };
+			ctx.metadata.processState = processState;
+			await Promise.resolve();
+			processState.handle = null;
+		},
+		onStop: (engine, ctx) => {
+			if (ctx.metadata.processState.handle !== null) {
+				throw new Error("metadata contains stale process state");
+			}
+		},
+		reformat: (engine, ctx) => {},
+		onCancel: (engine, ctx) => {},
+		probe: (engine, ctx) => ({ available: true, capabilities: {}, advice: [] }),
+	};
+	`
+	integration, err := LoadFromSourceNoError(t, source).NewIntegration(
+		integrationContext(&tool.AgentEngine{}, nil),
+	)
+	require.NoError(t, err)
+
+	cleanup, err := integration.StartRuntime()
+	require.NoError(t, err)
+	defer cleanup()
+
+	require.NoError(t, integration.Run())
+	require.NoError(t, integration.Stop())
 }
 
 func TestScriptedToolInstance(t *testing.T) {
@@ -175,6 +248,17 @@ let tool = {
 		})
 	})
 
+	t.Run("Tool source accepts supportsStop false", func(t *testing.T) {
+		toolSource := ToolSourceBegin + `
+			supportsStop: false,
+			run: (engine, ctx) => {},
+		` + ToolSourceEnd
+		sts := LoadFromSourceNoError(t, toolSource)
+		assert.False(t, sts.SupportsStop())
+		_, err := sts.NewIntegration(integrationContext(&tool.AgentEngine{}, nil))
+		require.NoError(t, err)
+	})
+
 	t.Run("ToolInstance rejects parameter options function", func(t *testing.T) {
 		modeOptionsDecl := `
 			const modeOptions = () => ["a", "b"];
@@ -235,7 +319,7 @@ let tool = {
 	t.Run("ToolInstance engineContext ExecCommand is bound correctly", func(t *testing.T) {
 		runSource := `
 			run: async (engine, ctx) => {
-			  cmdRes = await engine.execCommand("/bin/ls", {
+			  cmdRes = await engine.execCommand(["/bin/ls"], {
 					asPrivileged: true,
 					affinity: ["0"],
 					workingDirectory: "/tmp",
@@ -281,7 +365,7 @@ let tool = {
 		runSource := `
 			run: async (engine, ctx) => {
 			  runCalled = true
-				await engine.execCommand("/bin/sleep", {asPrivileged: false, affinity: [], workingDirectory: "/tmp", environment: {}})
+				await engine.execCommand(["/bin/sleep"], {asPrivileged: false, affinity: [], workingDirectory: "/tmp", environment: {}})
 			},
 			onStop: async(engine, ctx) => {
 			  stopCalled = true
@@ -548,10 +632,11 @@ let tool = {
 		mph.AssertExpectations(t)
 	})
 
-	t.Run("ToolInstance engineContext createTempDir is bound correctly", func(t *testing.T) {
+	t.Run("ToolInstance engineContext temp directory methods are bound correctly", func(t *testing.T) {
 		runWithCreateTempDir := `
 			run: async (engine, ctx) => {
 				generatedDir = await engine.createTempDir()
+				await engine.preserveTempDir(generatedDir)
 			},
 		`
 		toolSource := ToolSourceBegin + runWithCreateTempDir + ToolSourceEnd
@@ -560,6 +645,7 @@ let tool = {
 		require.NoError(t, err)
 
 		mec.On("CreateTempDir").Return("/tmp/tt", nil)
+		mec.On("PreserveTempDir", "/tmp/tt").Return(nil)
 
 		ah := &ti.(*GojaToolInstance).asyncHelper
 
@@ -645,6 +731,36 @@ let tool = {
 		require.ErrorContains(t, err, "unsupported locality")
 	})
 
+	t.Run("ToolInstance preserves message errors from locality resolution", func(t *testing.T) {
+		toolSource := ToolSourceBegin + `
+			run: async (engine, ctx) => {
+				engine.withLocality("host");
+			},
+		` + ToolSourceEnd
+
+		const hostAgentPath = "/host/tools/apx-agent/1.2.3"
+		agentNotDeployed := message.New(message.EngineAgentConnectionCreatorAgentNotDeployed).WithMetadata(map[string]string{
+			"workingDir": hostAgentPath,
+		})
+		engine := &tool_mocks.MockEngineContext{}
+		ic := integrationContext(engine, nil)
+		ic.ResolveLocality = func(string) (tool.EngineLocality, error) {
+			return tool.EngineLocality{}, agentNotDeployed
+		}
+		ti, err := LoadFromSourceNoError(t, toolSource).NewIntegration(ic)
+		require.NoError(t, err)
+
+		ah := &ti.(*GojaToolInstance).asyncHelper
+		ah.StartLoop()
+		err = ti.Run()
+		ah.StopLoop()
+
+		require.ErrorIs(t, err, agentNotDeployed)
+		msg := message.IsMessage(err)
+		require.NotNil(t, msg)
+		require.Equal(t, hostAgentPath, msg.Metadata()["workingDir"])
+	})
+
 	t.Run("ToolInstance keeps ctx.toolsRoot aligned with the default engine locality", func(t *testing.T) {
 		toolSource := ToolSourceBegin + `
 			run: async (engine, ctx) => {
@@ -688,6 +804,34 @@ let tool = {
 		assert.True(t, val)
 	})
 
+	t.Run("ToolInstance engineContext exposes machine platform info", func(t *testing.T) {
+		runSource := `
+			run: (engine, ctx) => {
+				const platformInfo = engine.getPlatform();
+				os = platformInfo.OS;
+				arch = platformInfo.Architecture;
+				osMatches = os === 'Android';
+				archMatches = arch === 'aarch64';
+			},
+		`
+		toolSource := ToolSourceBegin + runSource + ToolSourceEnd
+		mec := &tool_mocks.MockEngineContext{}
+		targetPlatform := conductor.PlatformConfiguration{OS: conductor.Android, Architecture: conductor.AArch64}
+		mec.On("GetPlatform").Return(targetPlatform).Once()
+
+		ti, err := LoadFromSourceNoError(t, toolSource).NewIntegration(integrationContext(mec, nil))
+		require.NoError(t, err)
+
+		ah := &ti.(*GojaToolInstance).asyncHelper
+		ah.StartLoop()
+		require.NoError(t, ti.Run())
+		ah.StopLoop()
+
+		assert.Equal(t, true, ah.Vm.Get("osMatches").Export())
+		assert.Equal(t, true, ah.Vm.Get("archMatches").Export())
+		mec.AssertExpectations(t)
+	})
+
 	t.Run("ToolInstance engineContext methods are bound correctly", func(t *testing.T) {
 		const prefix, suffix = `
 			run: async (engine, ctx) => {
@@ -709,6 +853,8 @@ let tool = {
 				func(m *MEC) { m.On("MakeWritable", "some/file", true).Return(nil) }},
 			{"chown", `await engine.chown("target/file", "newOwner", false)`,
 				func(m *MEC) { m.On("Chown", "target/file", "newOwner", false).Return(nil) }},
+			{"monotonicNow", `if (engine.monotonicNow() < 0) throw new Error("invalid monotonic time")`,
+				func(*MEC) {}},
 			{"log", `engine.log("info", "hello world")`,
 				func(m *MEC) { m.On("Log", "info", "hello world").Return() }},
 			{"writeUserMessage", `engine.writeUserMessage("warn", "action happened")`,
@@ -865,7 +1011,7 @@ let tool = {
 			await handle.append("stderr ")
 			await handle.append("data")
 			await handle.close()
-			readData = await engine.readHostFile(handle.path)
+			readData = await engine.readHostFile(handle.path())
 		},
 	`
 
@@ -875,7 +1021,8 @@ let tool = {
 		type MEC = tool_mocks.MockEngineContext
 		src := ToolSourceBegin + suffix + ToolSourceEnd
 		m := &MEC{}
-		hostFileHandle := &tool_mocks.MockFileHandle{PathValue: hostFile}
+		hostFileHandle := &tool_mocks.MockFileHandle{}
+		hostFileHandle.On("Path").Return(hostFile, nil)
 
 		closed := false
 		appended := []string{}
@@ -1012,23 +1159,23 @@ let tool = {
 				func(vm *goja.Runtime) { assert.Equal(t, "1234", vm.Get("a").String()) }},
 			{"workloadAttach", `a = ctx.workload`, func(ic *tool.IntegrationContext) { ic.Workload = &tool.WorkloadAttach{PID: 23} },
 				func(vm *goja.Runtime) {
-					assert.Equal(t, map[string]interface{}{"pid": int64(23), "type": "attach"}, vm.Get("a").Export())
+					assert.Equal(t, NewWorkloadAttach(23), vm.Get("a").Export())
 				}},
 			{"workloadLaunch", `a = ctx.workload`, func(ic *tool.IntegrationContext) {
 				ic.Workload = &tool.WorkloadLaunch{RawCommand: "ls", Command: []string{"ls"}, Environment: map[string]string{"FOO": "bar"}, WorkingDir: "/some/dir", UseShell: true}
 			},
 				func(vm *goja.Runtime) {
-					assert.Equal(t, map[string]interface{}{"rawCommand": "ls", "command": []string{"ls"}, "environment": map[string]string{"FOO": "bar"}, "type": "launch", "workingDir": "/some/dir", "useShell": true}, vm.Get("a").Export())
+					assert.Equal(t, NewWorkloadLaunch("ls", []string{"ls"}, map[string]string{"FOO": "bar"}, "/some/dir", true), vm.Get("a").Export())
 				}},
 			{"workloadAndroidLaunch", `a = ctx.workload`, func(ic *tool.IntegrationContext) {
 				ic.Workload = &tool.WorkloadAndroidLaunch{PackageName: "com.example.app", ActivityName: ".MainActivity"}
 			},
 				func(vm *goja.Runtime) {
-					assert.Equal(t, map[string]interface{}{"packageName": "com.example.app", "activityName": ".MainActivity", "type": "androidLaunch"}, vm.Get("a").Export())
+					assert.Equal(t, NewWorkloadAndroidLaunch("com.example.app", ".MainActivity"), vm.Get("a").Export())
 				}},
 			{"workloadSystemwide", `a = ctx.workload`, func(ic *tool.IntegrationContext) { ic.Workload = &tool.WorkloadSystemWide{} },
 				func(vm *goja.Runtime) {
-					assert.Equal(t, map[string]interface{}{"type": "systemWide"}, vm.Get("a").Export())
+					assert.Equal(t, NewWorkloadSystemWide(), vm.Get("a").Export())
 				}},
 			{"workingDir", `a = ctx.workingDir`, func(ic *tool.IntegrationContext) {},
 				func(vm *goja.Runtime) { assert.Equal(t, "/tmp/workdir", vm.Get("a").String()) }},
@@ -1052,6 +1199,29 @@ let tool = {
 				tt.test(ti.(*GojaToolInstance).asyncHelper.Vm)
 			})
 		}
+	})
+
+	t.Run("ToolInstance maps Go fields to JSON tag names", func(t *testing.T) {
+		runSource := `
+			run: (engine, ctx) => {
+				rawCommand = ctx.workload.rawCommand;
+				goFieldNameIsDefined = typeof ctx.workload.RawCommand !== "undefined";
+			},
+		`
+		toolSource := ToolSourceBegin + runSource + ToolSourceEnd
+		ic := integrationContext(&tool.AgentEngine{}, &tool.IntegrationContext{
+			Workload: &tool.WorkloadLaunch{RawCommand: "command"},
+		})
+		ti, err := LoadFromSourceNoError(t, toolSource).NewIntegration(ic)
+		require.NoError(t, err)
+
+		ah := &ti.(*GojaToolInstance).asyncHelper
+		ah.StartLoop()
+		require.NoError(t, ti.Run())
+		ah.StopLoop()
+
+		require.Equal(t, "command", ah.Vm.Get("rawCommand").String())
+		require.False(t, ah.Vm.Get("goFieldNameIsDefined").ToBoolean())
 	})
 
 	t.Run("ToolInstance binds parameters with defaults", func(t *testing.T) {
@@ -1254,6 +1424,257 @@ let tool = {
 	})
 }
 
+func TestAddToolCapability(t *testing.T) {
+	const (
+		validCall = `await engine.addToolCapability(
+			"cpu",
+			{name: "tool-capability", version: "1.0"},
+			{state: "available", payload: {count: 2, enabled: true}},
+		)`
+		outputEntityDir  = "entity"
+		expectedContents = `{"state":"available","payload":{"count":2,"enabled":true}}`
+	)
+
+	capabilityPath := filepath.Join("capabilities", "cpu.json")
+	newIntegration := func(t *testing.T, call string, engine tool.Engine, fileCollector tool.FileCollector) tool.ToolIntegration {
+		t.Helper()
+
+		source := ToolSourceBegin + `
+			run: async (engine, ctx) => {
+				` + call + `
+			},
+		` + ToolSourceEnd
+		integrationCtx := integrationContext(engine, nil)
+		integrationCtx.OutputEntityDir = outputEntityDir
+		integrationCtx.DefaultEngineLocality.FileCollector = fileCollector
+		integration, err := LoadFromSourceNoError(t, source).NewIntegration(integrationCtx)
+		require.NoError(t, err)
+		return integration
+	}
+	run := func(t *testing.T, integration tool.ToolIntegration) error {
+		t.Helper()
+
+		asyncHelper := &integration.(*GojaToolInstance).asyncHelper
+		asyncHelper.StartLoop()
+		t.Cleanup(asyncHelper.StopLoop)
+		return integration.Run()
+	}
+
+	t.Run("writes capability file and manifest entry", func(t *testing.T) {
+		runFilePath := filepath.Join(t.TempDir(), "cpu.json")
+		fileCollector := &tool_mocks.MockFileCollector{}
+		fileCollector.
+			On("AddComponent", outputEntityDir, cdf.ComponentType{Name: "tool-capability", SchemaVersion: "1.0"}, capabilityPath).
+			Return(runFilePath, nil).
+			Once()
+
+		fileHandle := &tool_mocks.MockFileHandle{}
+		fileHandle.On("Append", expectedContents+"\n").Return(nil).Once()
+		fileHandle.On("Close").Return(nil).Once()
+
+		engine := &tool_mocks.MockEngineContext{}
+		engine.On("CreateRunFile", runFilePath).Return(fileHandle, nil).Once()
+
+		integration := newIntegration(t, validCall, engine, fileCollector)
+		require.NoError(t, run(t, integration))
+		fileCollector.AssertExpectations(t)
+		engine.AssertExpectations(t)
+		fileHandle.AssertExpectations(t)
+	})
+
+	t.Run("rejects duplicate capability ID across localities", func(t *testing.T) {
+		const capabilityID = "shared"
+		capabilityPath := filepath.Join("capabilities", capabilityID+".json")
+		runFilePath := filepath.Join(t.TempDir(), capabilityID+".json")
+
+		targetCollector := &tool_mocks.MockFileCollector{}
+		targetCollector.
+			On("AddComponent", outputEntityDir, cdf.ComponentType{Name: "tool-capability", SchemaVersion: "1.0"}, capabilityPath).
+			Return(runFilePath, nil).
+			Once()
+		hostCollector := &tool_mocks.MockFileCollector{}
+
+		fileHandle := &tool_mocks.MockFileHandle{}
+		fileHandle.On("Append", `{"state":"available","payload":{}}`+"\n").Return(nil).Once()
+		fileHandle.On("Close").Return(nil).Once()
+
+		targetEngine := &tool_mocks.MockEngineContext{}
+		targetEngine.On("CreateRunFile", runFilePath).Return(fileHandle, nil).Once()
+		hostEngine := &tool_mocks.MockEngineContext{}
+
+		source := ToolSourceBegin + `
+			run: async (engine, ctx) => {
+				await engine.addToolCapability(
+					"shared",
+					{name: "tool-capability", version: "1.0"},
+					{state: "available", payload: {}},
+				);
+				await engine.withLocality("host").addToolCapability(
+					"shared",
+					{name: "tool-capability", version: "1.0"},
+					{state: "available", payload: {}},
+				);
+			},
+		` + ToolSourceEnd
+		integrationCtx := integrationContext(targetEngine, nil)
+		integrationCtx.OutputEntityDir = outputEntityDir
+		integrationCtx.DefaultEngineLocality.FileCollector = targetCollector
+		integrationCtx.ResolveLocality = func(name string) (tool.EngineLocality, error) {
+			if name != locality.Host {
+				return tool.EngineLocality{}, errors.New("unsupported locality")
+			}
+			return tool.EngineLocality{Engine: hostEngine, FileCollector: hostCollector}, nil
+		}
+		integration, err := LoadFromSourceNoError(t, source).NewIntegration(integrationCtx)
+		require.NoError(t, err)
+
+		require.ErrorContains(t, run(t, integration), `addToolCapability: capability ID "shared" has already been registered`)
+		targetCollector.AssertExpectations(t)
+		targetEngine.AssertExpectations(t)
+		fileHandle.AssertExpectations(t)
+		hostCollector.AssertNotCalled(t, "AddComponent", mock.Anything, mock.Anything, mock.Anything)
+		hostEngine.AssertNotCalled(t, "CreateRunFile", mock.Anything)
+	})
+
+	t.Run("rejects concurrent duplicate capability IDs", func(t *testing.T) {
+		const call = `await Promise.all([
+			engine.addToolCapability(
+				"concurrent",
+				{name: "tool-capability", version: "1.0"},
+				{state: "available", payload: {}},
+			),
+			engine.addToolCapability(
+				"concurrent",
+				{name: "tool-capability", version: "1.0"},
+				{state: "available", payload: {}},
+			),
+		])`
+		capabilityPath := filepath.Join("capabilities", "concurrent.json")
+		runFilePath := filepath.Join(t.TempDir(), "concurrent.json")
+
+		fileCollector := &tool_mocks.MockFileCollector{}
+		fileCollector.
+			On("AddComponent", outputEntityDir, cdf.ComponentType{Name: "tool-capability", SchemaVersion: "1.0"}, capabilityPath).
+			Return(runFilePath, nil).
+			Once()
+
+		fileHandle := &tool_mocks.MockFileHandle{}
+		fileHandle.On("Append", `{"state":"available","payload":{}}`+"\n").Return(nil).Once()
+		fileHandle.On("Close").Return(nil).Once()
+
+		engine := &tool_mocks.MockEngineContext{}
+		engine.On("CreateRunFile", runFilePath).Return(fileHandle, nil).Once()
+
+		integration := newIntegration(t, call, engine, fileCollector)
+		err := run(t, integration)
+		integration.(*GojaToolInstance).asyncHelper.PromiseWG.Wait()
+
+		require.ErrorContains(t, err, `addToolCapability: capability ID "concurrent" has already been registered`)
+		fileCollector.AssertExpectations(t)
+		engine.AssertExpectations(t)
+		fileHandle.AssertExpectations(t)
+	})
+
+	t.Run("removes capability ID after failed registration", func(t *testing.T) {
+		const capabilityID = "failed"
+		internalErr := errors.New("add component failed")
+		registry := newCapabilityIDRegistry()
+		vm := goja.New()
+		engine := &tool_mocks.MockEngineContext{}
+		fileCollector := &tool_mocks.MockFileCollector{}
+		fileCollector.
+			On("AddComponent", outputEntityDir, cdf.ComponentType{Name: "tool-capability", SchemaVersion: "1.0"}, filepath.Join("capabilities", capabilityID+".json")).
+			Return("", internalErr).
+			Once()
+		bound := NewBoundEngineContext(
+			engine,
+			nil,
+			&tool.IntegrationContext{OutputEntityDir: outputEntityDir},
+			fileCollector,
+			registry,
+		)
+
+		err := bound.AddToolCapability(
+			capabilityID,
+			vm.ToValue(map[string]any{"name": "tool-capability", "version": "1.0"}),
+			vm.ToValue(map[string]any{"state": "available", "payload": map[string]any{}}),
+		)
+		registry.mu.Lock()
+		_, capabilityIDExists := registry.ids[capabilityID]
+		registry.mu.Unlock()
+
+		require.ErrorContains(t, err, internalErr.Error())
+		require.False(t, capabilityIDExists)
+		fileCollector.AssertExpectations(t)
+		engine.AssertNotCalled(t, "CreateRunFile", mock.Anything)
+	})
+
+	t.Run("rejects incomplete component metadata", func(t *testing.T) {
+		const call = `await engine.addToolCapability(
+			"cpu",
+			{name: "tool-capability"},
+			{state: "available", payload: {}},
+		)`
+		engine := &tool_mocks.MockEngineContext{}
+		fileCollector := &tool_mocks.MockFileCollector{}
+
+		integration := newIntegration(t, call, engine, fileCollector)
+		require.ErrorContains(t, run(t, integration), "addToolCapability: has unset fields: version")
+		fileCollector.AssertExpectations(t)
+		engine.AssertExpectations(t)
+	})
+
+	t.Run("rejects incomplete contents", func(t *testing.T) {
+		const call = `await engine.addToolCapability(
+			"cpu",
+			{name: "tool-capability", version: "1.0"},
+			{state: "available"},
+		)`
+		engine := &tool_mocks.MockEngineContext{}
+		fileCollector := &tool_mocks.MockFileCollector{}
+
+		integration := newIntegration(t, call, engine, fileCollector)
+		require.ErrorContains(t, run(t, integration), "addToolCapability: has unset fields: payload")
+		fileCollector.AssertExpectations(t)
+		engine.AssertExpectations(t)
+	})
+
+	t.Run("rejects invalid capability ID", func(t *testing.T) {
+		vm := goja.New()
+		engine := &tool_mocks.MockEngineContext{}
+		fileCollector := &tool_mocks.MockFileCollector{}
+		bound := NewBoundEngineContext(engine, nil, nil, fileCollector, newCapabilityIDRegistry())
+
+		err := bound.AddToolCapability(
+			"../outside",
+			vm.ToValue(map[string]any{"name": "tool-capability", "version": "1.0"}),
+			vm.ToValue(map[string]any{"state": "available", "payload": map[string]any{}}),
+		)
+
+		require.ErrorContains(t, err, `addToolCapability: invalid capability ID "../outside"`)
+		fileCollector.AssertNotCalled(t, "AddComponent", mock.Anything, mock.Anything, mock.Anything)
+		engine.AssertNotCalled(t, "CreateRunFile", mock.Anything)
+	})
+
+	t.Run("propagates internal error", func(t *testing.T) {
+		runFilePath := filepath.Join(t.TempDir(), "cpu.json")
+		internalErr := errors.New("create run file failed")
+		fileCollector := &tool_mocks.MockFileCollector{}
+		fileCollector.
+			On("AddComponent", outputEntityDir, cdf.ComponentType{Name: "tool-capability", SchemaVersion: "1.0"}, capabilityPath).
+			Return(runFilePath, nil).
+			Once()
+
+		engine := &tool_mocks.MockEngineContext{}
+		engine.On("CreateRunFile", runFilePath).Return(&tool_mocks.MockFileHandle{}, internalErr).Once()
+
+		integration := newIntegration(t, validCall, engine, fileCollector)
+		require.ErrorContains(t, run(t, integration), internalErr.Error())
+		fileCollector.AssertExpectations(t)
+		engine.AssertExpectations(t)
+	})
+}
+
 func TestLoadFromSourceSupportsRequire(t *testing.T) {
 	dir := t.TempDir()
 	helperPath := filepath.Join(dir, "utils.js")
@@ -1344,56 +1765,6 @@ let tool = {
 	props := ti.Properties()
 	assert.Equal(t, "Symlink short", props.ShortDescription)
 	assert.Equal(t, "Symlink long", props.LongDescription)
-}
-
-func TestLoadSysutilTimelineIntegrationUsesEngineVersionedBundle(t *testing.T) {
-	toolPath := filepath.Clean(filepath.Join("..", "..", "..", "apap-cli", "tool-integrations", "sysutil-timeline.js"))
-	data, err := os.ReadFile(toolPath)
-	require.NoError(t, err)
-
-	sts, err := LoadFromSource(string(data), toolPath)
-	require.NoError(t, err)
-	assert.Equal(t, "sysutil-timeline", sts.ToolName)
-	assert.Equal(t, "1.0.0", sts.ToolVersion)
-
-	require.NotEmpty(t, sts.ToolDeployments)
-	for _, deployment := range sts.ToolDeployments {
-		require.Len(t, deployment.Dependencies, 1)
-		dep := deployment.Dependencies[0]
-		assert.Equal(t, deploymentsupport.DependencyTypeToolBundle, dep.Type)
-		assert.Equal(t, "sysutil-timeline", dep.Name)
-		assert.Equal(t, versions.GetVersion(), dep.Version)
-	}
-}
-
-func TestNeoprofAndroidWorkloadUsesSeparateSlRecordArguments(t *testing.T) {
-	toolPath := filepath.Clean(filepath.Join("..", "..", "..", "apap-cli", "tool-integrations", "neoprof.js"))
-	data, err := os.ReadFile(toolPath)
-	require.NoError(t, err)
-
-	sts, err := LoadFromSource(string(data), toolPath)
-	require.NoError(t, err)
-
-	ti, err := sts.NewIntegration(integrationContext(&tool_mocks.MockEngineContext{}, nil))
-	require.NoError(t, err)
-
-	vm := ti.(*GojaToolInstance).asyncHelper.Vm
-	workloadToSLArgs, ok := goja.AssertFunction(vm.Get("workloadToSLArgs"))
-	require.True(t, ok)
-
-	workload := vm.NewObject()
-	require.NoError(t, workload.Set("type", "androidLaunch"))
-	require.NoError(t, workload.Set("packageName", "com.example.app"))
-	require.NoError(t, workload.Set("activityName", ".MainActivity"))
-
-	args, err := workloadToSLArgs(goja.Undefined(), workload)
-	require.NoError(t, err)
-	assert.Equal(t, []any{
-		"--android-pkg",
-		"com.example.app",
-		"--android-activity",
-		".MainActivity",
-	}, args.Export())
 }
 
 func TestLoadFromSourceParsesDependencyLocality(t *testing.T) {
@@ -1495,5 +1866,51 @@ func TestLoadFromSource(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "testTool", sts.ToolName)
 		assert.Equal(t, "0.1", sts.ToolVersion)
+	})
+}
+
+func TestLoadBinding(t *testing.T) {
+	t.Run("returns complete tool binding", func(t *testing.T) {
+		source, err := LoadFromSource(ToolSource, "dummy")
+		require.NoError(t, err)
+
+		binding, err := source.LoadBinding(goja.New())
+		require.NoError(t, err)
+		assert.Equal(t, "testTool", binding.Name)
+		assert.Equal(t, "0.1", binding.Version)
+		assert.NotNil(t, binding.Probe)
+		assert.NotNil(t, binding.Run)
+	})
+
+	t.Run("performs full binding validation", func(t *testing.T) {
+		source, err := LoadFromSource(`
+			let tool = {
+				name: "testTool",
+				version: "0.1",
+			}
+		`, "dummy")
+		require.NoError(t, err)
+
+		_, err = source.LoadBinding(goja.New())
+		require.Error(t, err)
+	})
+
+	t.Run("supports CommonJS dependencies", func(t *testing.T) {
+		directory := t.TempDir()
+		require.NoError(t, os.WriteFile(
+			filepath.Join(directory, "value.js"),
+			[]byte(`module.exports = 42;`),
+			0o600,
+		))
+		source, err := LoadFromSource(
+			`const value = require("./value");`+ToolSource,
+			filepath.Join(directory, "tool.js"),
+		)
+		require.NoError(t, err)
+
+		binding, err := source.LoadBinding(goja.New())
+
+		require.NoError(t, err)
+		assert.Equal(t, "testTool", binding.Name)
 	})
 }

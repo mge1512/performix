@@ -1,6 +1,10 @@
 {
   "defaults": {
     "recipe": "code_hotspots",
+    "instance_type": "m8g.xlarge",
+    "prerecord": {
+      "mode": "launch"
+    },
     "attempts": 1,
     "min_passes": 1,
     "min_pass_rate": 1.0
@@ -281,6 +285,11 @@
       "id": "test_case_26",
       "summary": "Cpp ASTL sysfs file reopen overhead",
       "acts": ["act3"],
+      "prerecord": {
+        "timeout_seconds": 60,
+        "setup": ["sudo", "-n", "bash", "external/test_case_26/sidecar.sh", "setup"],
+        "cleanup": ["sudo", "-n", "bash", "external/test_case_26/sidecar.sh", "cleanup"]
+      },
       "run_artifact": "test_case_26/latest.zip",
       "rubric": "rubrics/test_case_26.md"
     },
@@ -288,6 +297,13 @@
       "id": "test_case_27",
       "summary": "cSharp Orchard CMS HTTP load",
       "acts": ["act3"],
+      "recipe_params": ["collect_dotnet_stacks=true"],
+      "prerecord": {
+        "mode": "attach",
+        "timeout_seconds": 25,
+        "setup": ["bash", "external/test_case_27/sidecar.sh", "setup"],
+        "cleanup": ["bash", "external/test_case_27/sidecar.sh", "cleanup"]
+      },
       "run_artifact": "test_case_27/latest.zip",
       "rubric": "rubrics/test_case_27.md",
       "expected_failures": {
@@ -326,6 +342,315 @@
       "acts": ["act2"],
       "run_artifact": "test_case_31/latest.zip",
       "rubric": "rubrics/test_case_31.md"
+    },
+    {
+      "id": "test_case_32",
+      "summary": "System sustained CPU oversubscription",
+      "recipe": "system_utilization",
+      "acts": ["act1"],
+      "run_artifact": "test_case_32/latest.zip",
+      "rubric": "rubrics/test_case_32.md"
+    },
+    {
+      "id": "test_case_33",
+      "summary": "System periodic synchronous write pressure",
+      "recipe": "system_utilization",
+      "acts": ["act2"],
+      "run_artifact": "test_case_33/latest.zip",
+      "rubric": "rubrics/test_case_33.md"
+    },
+    {
+      "id": "test_case_34",
+      "summary": "Memory saturation",
+      "recipe": "system_utilization",
+      "acts": ["act2"],
+      "run_artifact": "test_case_34/latest.zip",
+      "rubric": "rubrics/test_case_34.md"
+    },
+    {
+      "id": "test_case_35",
+      "summary": "System transient CPU spike control",
+      "recipe": "system_utilization",
+      "acts": ["act2"],
+      "run_artifact": "test_case_35/latest.zip",
+      "rubric": "rubrics/test_case_35.md"
+    },
+    {
+      "id": "test_case_36",
+      "summary": "Cpp multi-hotspot instruction mix with function-level attribution",
+      "recipe": "instruction_mix",
+      "acts": ["act2"],
+      "run_artifact": "test_case_36/latest.zip",
+      "rubric": "rubrics/test_case_36.md",
+      "recipe_params": ["mode=both"]
+    },
+    {
+      "id": "test_case_37",
+      "summary": "Cpp auto-vectorized floating-point loop with strong SIMD contribution",
+      "recipe": "instruction_mix",
+      "acts": ["act1"],
+      "run_artifact": "test_case_37/latest.zip",
+      "rubric": "rubrics/test_case_37.md",
+      "recipe_params": ["mode=both"]
+    },
+    {
+      "id": "test_case_38",
+      "summary": "Cpp control-flow-heavy scalar byte classification loop",
+      "recipe": "instruction_mix",
+      "acts": ["act2"],
+      "run_artifact": "test_case_38/latest.zip",
+      "rubric": "rubrics/test_case_38.md",
+      "recipe_params": ["mode=dynamic"]
+    },
+    {
+      "id": "test_case_39",
+      "summary": "Cpp twin transforms with mismatched optimization",
+      "recipe": "instruction_mix",
+      "acts": ["act2"],
+      "run_artifact": "test_case_39/latest.zip",
+      "rubric": "rubrics/test_case_39.md",
+      "recipe_params": ["mode=both"]
+    },
+    {
+      "id": "test_case_40",
+      "summary": "Assembly static SIMD-heavy whole-binary instruction mix",
+      "recipe": "instruction_mix",
+      "acts": ["act2"],
+      "run_artifact": "test_case_40/latest.zip",
+      "rubric": "rubrics/test_case_40.md",
+      "recipe_params": ["mode=static"]
+    },
+    {
+      "id": "test_case_41",
+      "summary": "Cpp periodic resource catalogue discovery",
+      "recipe": "syscall_trace_summary",
+      "acts": ["act2"],
+      "run_artifact": "test_case_41/latest.zip",
+      "rubric": "rubrics/test_case_41.md"
+    },
+    {
+      "id": "test_case_42",
+      "summary": "Cpp batched and per-record log persistence",
+      "recipe": "syscall_trace_summary",
+      "acts": ["act2"],
+      "run_artifact": "test_case_42/latest.zip",
+      "rubric": "rubrics/test_case_42.md"
+    },
+    {
+      "id": "test_case_43",
+      "summary": "Cpp notification polling with command-worker launches",
+      "recipe": "syscall_trace_summary",
+      "acts": ["act2"],
+      "run_artifact": "test_case_43/latest.zip",
+      "rubric": "rubrics/test_case_43.md"
+    },
+    {
+      "id": "test_case_44",
+      "summary": "Cpp sparse blocking timer-driven event-loop control",
+      "recipe": "syscall_trace_summary",
+      "acts": ["act2"],
+      "run_artifact": "test_case_44/latest.zip",
+      "rubric": "rubrics/test_case_44.md"
+    },
+    {
+      "id": "test_case_45",
+      "summary": "Cpp periodic settings-file reloads",
+      "recipe": "syscall_trace_summary",
+      "acts": ["act1"],
+      "run_artifact": "test_case_45/latest.zip",
+      "rubric": "rubrics/test_case_45.md"
+    },
+    {
+      "id": "test_case_46",
+      "summary": "Cpp generated request handlers with an oversized active code footprint",
+      "recipe": "cpu_microarchitecture",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_46/latest.zip",
+      "rubric": "rubrics/test_case_46.md",
+      "recipe_params": ["sampling_freq=normal"]
+    },
+    {
+      "id": "test_case_47",
+      "summary": "Cpp analytics hot-field access through large records",
+      "recipe": "cpu_microarchitecture",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_47/latest.zip",
+      "rubric": "rubrics/test_case_47.md",
+      "recipe_params": ["sampling_freq=normal"]
+    },
+    {
+      "id": "test_case_48",
+      "summary": "Dotnet vector aggregation with efficient high Retiring execution",
+      "recipe": "cpu_microarchitecture",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_48/latest.zip",
+      "rubric": "rubrics/test_case_48.md",
+      "recipe_params": ["sampling_freq=normal", "collect_dotnet_stacks=true"]
+    },
+    {
+      "id": "test_case_49",
+      "summary": "Cpp unpredictable mixed-protocol packet dispatch",
+      "recipe": "cpu_microarchitecture",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act1"],
+      "run_artifact": "test_case_49/latest.zip",
+      "rubric": "rubrics/test_case_49.md",
+      "recipe_params": ["sampling_freq=normal"]
+    },
+    {
+      "id": "test_case_50",
+      "summary": "Cpp serial route lookups through a shuffled score table",
+      "recipe": "cpu_microarchitecture",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_50/latest.zip",
+      "rubric": "rubrics/test_case_50.md",
+      "recipe_params": ["sampling_freq=normal"]
+    },
+    {
+      "id": "test_case_51",
+      "summary": "Cpp sparse page-granular tenant index with DTLB pressure",
+      "recipe": "cpu_microarchitecture",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_51/latest.zip",
+      "rubric": "rubrics/test_case_51.md",
+      "recipe_params": ["sampling_freq=normal"]
+    },
+    {
+      "id": "test_case_52",
+      "summary": "Cpp composite frontend backend and speculation kernels",
+      "recipe": "cpu_microarchitecture",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_52/latest.zip",
+      "rubric": "rubrics/test_case_52.md",
+      "recipe_params": ["sampling_freq=normal"]
+    },
+    {
+      "id": "test_case_53",
+      "summary": "ASCT system information",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_53/latest.zip",
+      "rubric": "rubrics/test_case_53.md",
+      "mcp_prompt": "Show me AI Insights for the system information in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_54",
+      "summary": "ASCT idle latency",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_53/latest.zip",
+      "rubric": "rubrics/test_case_54.md",
+      "mcp_prompt": "Show me AI Insights for the idle-latency benchmark in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_55",
+      "summary": "ASCT peak bandwidth",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_53/latest.zip",
+      "rubric": "rubrics/test_case_55.md",
+      "mcp_prompt": "Show me AI Insights for the peak-bandwidth benchmark in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_56",
+      "summary": "ASCT cross-NUMA bandwidth",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_53/latest.zip",
+      "rubric": "rubrics/test_case_56.md",
+      "mcp_prompt": "Show me AI Insights for the cross-NUMA-bandwidth benchmark in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_57",
+      "summary": "ASCT latency sweep",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_53/latest.zip",
+      "rubric": "rubrics/test_case_57.md",
+      "mcp_prompt": "Show me AI Insights for the latency-sweep benchmark in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_58",
+      "summary": "ASCT bandwidth sweep",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_53/latest.zip",
+      "rubric": "rubrics/test_case_58.md",
+      "mcp_prompt": "Show me AI Insights for the bandwidth-sweep benchmark in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_59",
+      "summary": "ASCT loaded latency",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_59/latest.zip",
+      "rubric": "rubrics/test_case_59.md",
+      "mcp_prompt": "Show me AI Insights for the loaded-latency benchmark in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["benchmark_loaded_latency=true"]
+    },
+    {
+      "id": "test_case_60",
+      "summary": "ASCT core-to-core latency",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_53/latest.zip",
+      "rubric": "rubrics/test_case_60.md",
+      "mcp_prompt": "Show me AI Insights for the core-to-core-latency benchmark in Performix run {run_id}. Use Markdown.",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_61",
+      "summary": "ASCT low peak bandwidth",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act1"],
+      "run_artifact": "test_case_61/latest.zip",
+      "rubric": "rubrics/test_case_61.md",
+      "mcp_prompt": "Show me AI Insights for the peak-bandwidth benchmark in Performix run {run_id}. Use Markdown.",
+      "run_modification": "low_peak_bandwidth",
+      "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_62",
+      "summary": "ASCT asymmetric core-to-core latency",
+      "recipe": "asct",
+      "instance_type": "c8g.metal-24xl",
+      "prerecord": {"mode": "system-wide"},
+      "acts": ["act2"],
+      "run_artifact": "test_case_62/latest.zip",
+      "rubric": "rubrics/test_case_62.md",
+      "mcp_prompt": "Show me AI Insights for the core-to-core-latency benchmark in Performix run {run_id}. Use Markdown.",
+      "run_modification": "core_to_core_latency_asymmetry",
+      "recipe_params": ["default_benchmarks=true"]
     }
   ]
 }

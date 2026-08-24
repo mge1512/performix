@@ -72,8 +72,9 @@ Run the narrowest relevant checks for the files changed, then broaden coverage i
   - 'task deps:tools' installs the `reuse` tool.
   - `copyright:annotate` adds copyright and license metadata to files missing it, and `copyright:lint` checks it's correct.
 - All new files generally need copyright (`SPDX-FileCopyrightText`) and license (`SPDX-License-Identifier`) notices.
-- Use `.license` sidecar files adjacent to the file in question for special one-off files, for example `example.json.license`.
-- Otherwise, for files that cannot easily contain comments, prefer central coverage in [`REUSE.toml`](REUSE.toml). Update `REUSE.toml` to apply shared metadata to generated files, fixtures, data files, or other paths where per-file headers are unsuitable.
+- Prefer inline SPDX headers when the file format supports comments.
+- Use `.license` sidecar files adjacent to files that cannot contain comments, for example `my-file.json.license` if the file is called `my-file.json`.
+- Use [`REUSE.toml`](REUSE.toml) only for special cases where a sidecar or inline header is unsuitable, such as generated files, large generated trees, vendored or copied file groups with shared metadata, fixtures, data sets, or other centrally managed paths.
 - Some formats may carry their own visible metadata too, such as the `copyright` and `license` fields in the telemetry JSON files.
 - The default first-party snippet is maintained in [`copyright-license-header.txt`](copyright-license-header.txt).
 - Run `task copyright:annotate` to add headers, or `.license` sidecar files where headers are not supported, to first-party files; then review the diff.
@@ -83,7 +84,11 @@ Run the narrowest relevant checks for the files changed, then broaden coverage i
 
 ## Sensitive Changes
 
-- This internal repository is periodically mirrored to an open-source public repository. Pull requests containing sensitive information should be carefully reviewed before merging.
+This internal repository is periodically mirrored to an open-source public repository. Pull requests containing sensitive information should be carefully reviewed before merging.
+
+- Sensitive information (such as use of codewords) may exist in PR titles and descriptions, commit messages, source code (comments, variable names, etc.), in generated files, data files included from elsewhere (e.g. telemetry JSON files).
+- Be aware that the repository uses squash merging for merging pull requests, which sets the default commit message to be the pull request title and description. This means that sensitive information can leak from the pull request into the commit message.
+- `.ossmosis.json` is the source of truth for classifying repository paths for the public mirror. Paths are classified as public by default, while exclusion rules identify internal-only paths that must be omitted from the open-source repository. These classifications are also used when scanning content intended for publication for restricted or sensitive terms.
 - If the `restricted-terms.yaml` workflow detects sensitive changes, the check will fail, but it is not configured as a required check for merging PRs. Consider whether any offending usages need fixing.
 - If the change must be delivered to the internal repository despite containing sensitive information (e.g. so that a sensitive feature can be delivered):
   - Consider whether the sensitive information can be removed or replaced with a placeholder.

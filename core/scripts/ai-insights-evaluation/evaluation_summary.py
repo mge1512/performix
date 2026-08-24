@@ -427,9 +427,12 @@ def _format_mcp_detail_lines(
         _format_mcp_calls(attempts),
     ]
     details = " ".join(part for part in details_parts if part and part != "-")
+    tool_failures = _format_mcp_tool_failures(attempts)
     truncation = _format_tool_output_truncation(attempts)
     lines = [details] if details else []
     lines.extend(_format_performance_quality_lines(attempts))
+    if tool_failures:
+        lines.append(tool_failures)
     if truncation:
         lines.append(truncation)
     return lines
@@ -559,10 +562,19 @@ def _format_token_usage(attempts: list[dict[str, str]]) -> str:
 
 
 def _format_mcp_calls(attempts: list[dict[str, str]]) -> str:
-    calls = _sum_int_property(attempts, "ai_mcp_completed_calls")
+    calls = _sum_int_property(attempts, "ai_mcp_tool_calls_succeeded")
+    calls += _sum_int_property(attempts, "ai_mcp_tool_calls_failed")
     if calls == 0:
         return ""
     return f"calls={calls}"
+
+
+def _format_mcp_tool_failures(attempts: list[dict[str, str]]) -> str:
+    failures = _sum_int_property(attempts, "ai_mcp_tool_calls_failed")
+    if failures == 0:
+        return ""
+    suffix = "" if failures == 1 else "s"
+    return f"⚠️  Warning: {_format_int(failures)} MCP tool call{suffix} failed"
 
 
 def _format_performance_quality_lines(

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -30,6 +31,37 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/target"
 	"github.com/Arm-Debug/apap-cli/apap-engine/util"
 )
+
+type cancelOnErrContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newCancelOnErrContext() *cancelOnErrContext {
+	return &cancelOnErrContext{
+		Context: context.Background(),
+		done:    make(chan struct{}),
+	}
+}
+
+func (c *cancelOnErrContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *cancelOnErrContext) Err() error {
+	c.once.Do(func() { close(c.done) })
+	return context.Canceled
+}
+
+func (c *cancelOnErrContext) isCanceled() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
 
 func NewTestRunCollection(t *testing.T, path string) *RunCollection {
 	t.Helper()
@@ -907,6 +939,57 @@ func TestRunMetadata(t *testing.T) {
 	})
 }
 
+type recordingMetadataUpdateNotifier struct {
+	updates []RunMetadataUpdateReason
+}
+
+func (n *recordingMetadataUpdateNotifier) OnRunMetadataChanged(reason RunMetadataUpdateReason) {
+	n.updates = append(n.updates, reason)
+}
+
+func TestRunMetadataUpdater_AccumulatesStopSupportAndNotifiesOnPersistedChanges(t *testing.T) {
+	runCollection := NewTestRunCollection(t, t.TempDir())
+	builder, err := runCollection.RunBuilder()
+	require.NoError(t, err)
+
+	metadata := &cdf.Metadata{
+		Name:         "active run",
+		TargetConfig: emptySSHTargetConfig,
+	}
+	runID, err := runCollection.CreateRun(builder, metadata)
+	require.NoError(t, err)
+
+	notifier := &recordingMetadataUpdateNotifier{}
+	updater := NewRunMetadataUpdater(runID, runCollection, notifier)
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = updater.AccumulateSupportsStop(cancelledCtx, true)
+	require.Error(t, err)
+
+	updatedMetadata, err := runCollection.readMetadata(runID)
+	require.NoError(t, err)
+	assert.Nil(t, updatedMetadata.SupportsStop)
+
+	err = updater.AccumulateSupportsStop(context.Background(), true)
+	require.NoError(t, err)
+
+	// A run only supports Stop when every tool used by the recipe supports it.
+	// Once a tool opts out, later tools that support Stop must not re-enable it.
+	err = updater.AccumulateSupportsStop(context.Background(), false)
+	require.NoError(t, err)
+	err = updater.AccumulateSupportsStop(context.Background(), true)
+	require.NoError(t, err)
+
+	updatedMetadata, err = runCollection.readMetadata(runID)
+	require.NoError(t, err)
+	require.NotNil(t, updatedMetadata.SupportsStop)
+	assert.False(t, *updatedMetadata.SupportsStop)
+	assert.Equal(t, []RunMetadataUpdateReason{
+		RunMetadataUpdateReasonSupportsStop,
+		RunMetadataUpdateReasonSupportsStop,
+	}, notifier.updates)
+}
+
 func TestRunCollectionCategorization(t *testing.T) {
 	t.Run("missing categorization returns empty categorization", func(t *testing.T) {
 		runCollection := NewTestRunCollection(t, t.TempDir())
@@ -954,6 +1037,7 @@ func TestRunDescription(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, desc.Group)
 		assert.Equal(t, []string{}, desc.Tags)
+		assert.True(t, desc.SupportsStop)
 	})
 
 	t.Run("returns categorization fields", func(t *testing.T) {
@@ -977,6 +1061,26 @@ func TestRunDescription(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "compiler", desc.Group)
 		assert.Equal(t, []string{"nightly", "baseline"}, desc.Tags)
+	})
+
+	t.Run("uses metadata stop support", func(t *testing.T) {
+		runCollection := NewTestRunCollection(t, t.TempDir())
+		builder, err := runCollection.RunBuilder()
+		require.NoError(t, err)
+
+		supportsStop := false
+		metadata := &cdf.Metadata{
+			Name:         "active run",
+			SupportsStop: &supportsStop,
+			TargetConfig: emptySSHTargetConfig,
+		}
+		runID, err := runCollection.CreateRun(builder, metadata)
+		require.NoError(t, err)
+
+		desc, err := runCollection.RunDescription(context.Background(), runID)
+
+		require.NoError(t, err)
+		assert.False(t, desc.SupportsStop)
 	})
 
 	t.Run("returns error when manifest cannot be read", func(t *testing.T) {
@@ -1212,7 +1316,7 @@ func TestRunImport(t *testing.T) {
 	rb.AddComponent(cdf.ComponentType{Name: "component_2", SchemaVersion: "1.0"}, filepath.Join("mySecondEntity", "component_2.txt"))
 	err = os.MkdirAll(fakeRunCollectionPath, os.ModePerm)
 	assert.NoError(t, err)
-	validRunID, err := runCollection.CreateRun(rb, &cdf.Metadata{Name: "Testing!"})
+	validRunID, err := runCollection.CreateRun(rb, &cdf.Metadata{Name: "Testing!", RunResult: string(RecipeSuccess)})
 	assert.NoError(t, err)
 
 	// Export run to a directory
@@ -1220,6 +1324,15 @@ func TestRunImport(t *testing.T) {
 	err = runCollection.ExportRun(context.Background(), validRunID, fakePlaygroundPath)
 	assert.NoError(t, err)
 	assert.FileExists(t, validZipPath)
+
+	preservedSize := uint64(42)
+	preservedMetadata, err := runCollection.readMetadata(validRunID)
+	require.NoError(t, err)
+	preservedMetadata.SizeBytes = &preservedSize
+	require.NoError(t, runCollection.writeMetadata(validRunID, &preservedMetadata))
+	preservedPlaygroundPath := filepath.Join(testDir, "preserved-playground")
+	preservedZipPath := filepath.Join(preservedPlaygroundPath, fmt.Sprintf("%s.zip", validRunID.Value))
+	require.NoError(t, runCollection.ExportRun(context.Background(), validRunID, preservedPlaygroundPath))
 
 	// Remove run from runCollection
 	err = runCollection.DeleteRun(context.Background(), validRunID)
@@ -1235,10 +1348,51 @@ func TestRunImport(t *testing.T) {
 		// Check contents of run have been imported correctly
 		assert.DirExists(t, filepath.Join(runCollection.GetRunPath(importedID), "myFirstEntity", "sub_dir", "sub_sub_dir"))
 		assert.DirExists(t, filepath.Join(runCollection.GetRunPath(importedID), "mySecondEntity"))
+		importedMetadata, err := runCollection.readMetadata(importedID)
+		require.NoError(t, err)
+		require.NotNil(t, importedMetadata.SizeBytes)
 
 		// Cleanup
 		err = runCollection.DeleteRun(context.Background(), importedID)
 		assert.NoError(t, err)
+	})
+
+	t.Run("updates existing imported size as necessary", func(t *testing.T) {
+		importedID, err := runCollection.ImportRun(preservedZipPath)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, runCollection.DeleteRun(context.Background(), importedID))
+		})
+
+		importedMetadata, err := runCollection.readMetadata(importedID)
+		require.NoError(t, err)
+		require.NotNil(t, importedMetadata.SizeBytes)
+		require.NotEqual(t, preservedSize, *importedMetadata.SizeBytes)
+
+		unlock, err := runCollection.RLockRun(context.Background(), importedID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, unlock()) }()
+		calculatedSize, err := runCollection.calculateRunSizeLocked(context.Background(), importedID)
+		require.NoError(t, err)
+		require.Equal(t, calculatedSize, *importedMetadata.SizeBytes)
+	})
+
+	t.Run("size persistence failure does not fail import", func(t *testing.T) {
+		importCollectionPath := filepath.Join(t.TempDir(), "runs")
+		rc := NewTestRunCollectionWithImports(t, importCollectionPath, importDeps{
+			rename: func(oldPath, newPath string) error {
+				if err := os.Rename(oldPath, newPath); err != nil {
+					return err
+				}
+				return os.Remove(filepath.Join(newPath, metadataFileName))
+			},
+		})
+		require.NoError(t, rc.create())
+
+		importedID, err := rc.ImportRun(validZipPath)
+
+		require.NoError(t, err)
+		require.True(t, rc.runExists(importedID))
 	})
 
 	t.Run("test importing the same run twice have different IDs", func(t *testing.T) {
@@ -1778,6 +1932,80 @@ func TestRunRename(t *testing.T) {
 		assert.Equal(t, newName, loadedMetadata.Name)
 	})
 
+	t.Run("updates a terminal run size after renaming", func(t *testing.T) {
+		builder, err := rc.RunBuilder()
+		require.NoError(t, err)
+
+		oldName := "a"
+		runID, err := rc.CreateRun(builder, &cdf.Metadata{
+			Name:         oldName,
+			RunResult:    string(RecipeSuccess),
+			TargetConfig: emptySSHTargetConfig,
+		})
+		require.NoError(t, err)
+		updated, err := rc.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+
+		metadata, err := rc.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		initialSize := *metadata.SizeBytes
+
+		newName := "aaaa"
+		require.NoError(t, rc.RenameRun(context.Background(), runID, newName))
+
+		metadata, err = rc.readMetadata(runID)
+		require.NoError(t, err)
+		require.Equal(t, newName, metadata.Name)
+		require.NotNil(t, metadata.SizeBytes)
+		require.Equal(t, initialSize+3, *metadata.SizeBytes)
+
+		unlock, err := rc.RLockRun(context.Background(), runID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, unlock()) }()
+		calculatedSize, err := rc.calculateRunSizeLocked(context.Background(), runID)
+		require.NoError(t, err)
+		require.Equal(t, calculatedSize, *metadata.SizeBytes)
+	})
+
+	t.Run("failure to update run size field is non-blocking", func(t *testing.T) {
+		builder, err := rc.RunBuilder()
+		require.NoError(t, err)
+
+		runID, err := rc.CreateRun(builder, &cdf.Metadata{
+			Name:         "a",
+			RunResult:    string(RecipeSuccess),
+			TargetConfig: emptySSHTargetConfig,
+		})
+		require.NoError(t, err)
+		updated, err := rc.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+
+		metadata, err := rc.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		initialSize := *metadata.SizeBytes
+
+		ctx := newCancelOnErrContext()
+		require.NoError(t, rc.RenameRun(ctx, runID, "aaaa"))
+		require.True(t, ctx.isCanceled())
+
+		metadata, err = rc.readMetadata(runID)
+		require.NoError(t, err)
+		require.Equal(t, "aaaa", metadata.Name)
+		require.NotNil(t, metadata.SizeBytes)
+		require.Equal(t, initialSize, *metadata.SizeBytes)
+
+		unlock, err := rc.RLockRun(context.Background(), runID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, unlock()) }()
+		calculatedSize, err := rc.calculateRunSizeLocked(context.Background(), runID)
+		require.NoError(t, err)
+		require.Equal(t, initialSize+3, calculatedSize)
+	})
+
 	t.Run("fails to rename a non-existent run", func(t *testing.T) {
 		err := rc.RenameRun(context.Background(), RunID{Value: "i-dont-exist"}, "new name")
 		expectedErr := message.New(message.EngineRunDoesNotExist).WithMetadata(map[string]string{"runID": "i-dont-exist"})
@@ -2234,6 +2462,176 @@ func TestSetRunEndTime(t *testing.T) {
 		require.Equal(t, expectedErr, err)
 		require.NoError(t, message.ValidateMetadataPlaceholders(err))
 	})
+}
+
+func TestPersistRunSize(t *testing.T) {
+	createRun := func(t *testing.T, result RunResult) (*RunCollection, RunID) {
+		t.Helper()
+
+		runCollection := NewTestRunCollection(t, filepath.Join(t.TempDir(), "runs"))
+		require.NoError(t, runCollection.create())
+		runID := RunID{Value: "abcdef123456"}
+		runPath := runCollection.GetRunPath(runID)
+		require.NoError(t, os.MkdirAll(filepath.Join(runPath, "nested", renderDirName), perms.LocalDirPerm))
+		require.NoError(t, os.MkdirAll(filepath.Join(runPath, renderDirName), perms.LocalDirPerm))
+		require.NoError(t, runCollection.writeMetadata(runID, &cdf.Metadata{
+			RunResult:    string(result),
+			TargetConfig: emptySSHTargetConfig,
+		}))
+		require.NoError(t, os.WriteFile(filepath.Join(runPath, "nested", "data"), []byte("12345"), perms.LocalFilePerm))
+		require.NoError(t, os.WriteFile(filepath.Join(runPath, "nested", renderDirName, "data"), []byte("1234567"), perms.LocalFilePerm))
+		require.NoError(t, os.WriteFile(filepath.Join(runPath, renderDirName, "cache"), []byte(strings.Repeat("x", 100)), perms.LocalFilePerm))
+		return runCollection, runID
+	}
+
+	t.Run("persists terminal run size and excludes only the top-level render directory", func(t *testing.T) {
+		runCollection, runID := createRun(t, RecipeSuccess)
+		metadataInfo, err := os.Stat(runCollection.getMetadataPath(runID))
+		require.NoError(t, err)
+		expectedSize := metadataInfo.Size() + 5 + 7 // byte sizes of the 2 files
+		expectedSize += int64(len(fmt.Sprintf(`"run.size_bytes":%v,`, expectedSize)))
+
+		updated, err := runCollection.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+
+		metadata, err := runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		require.EqualValues(t, expectedSize, *metadata.SizeBytes)
+	})
+
+	t.Run("updates an outdated persisted size", func(t *testing.T) {
+		runCollection, runID := createRun(t, RecipeSuccess)
+		updated, err := runCollection.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+		metadata, err := runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		initialSize := *metadata.SizeBytes
+
+		require.NoError(t, os.WriteFile(filepath.Join(runCollection.GetRunPath(runID), "later"), []byte("new"), perms.LocalFilePerm))
+		updated, err = runCollection.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+		metadata, err = runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		expectedSize := initialSize + 3
+		require.Equal(t, expectedSize, *metadata.SizeBytes)
+
+		updated, err = runCollection.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.False(t, updated)
+		metadata, err = runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		require.Equal(t, expectedSize, *metadata.SizeBytes)
+	})
+
+	t.Run("does not size runs that are still in progress", func(t *testing.T) {
+		for _, result := range []RunResult{RecipeInProgress, RecipeInProgressPhase1Complete} {
+			t.Run(string(result), func(t *testing.T) {
+				runCollection, runID := createRun(t, result)
+
+				updated, err := runCollection.PersistRunSize(context.Background(), runID)
+				require.NoError(t, err)
+				require.False(t, updated)
+
+				metadata, err := runCollection.readMetadata(runID)
+				require.NoError(t, err)
+				require.Nil(t, metadata.SizeBytes)
+			})
+		}
+	})
+
+	t.Run("returns a lock error without changing metadata", func(t *testing.T) {
+		runCollection, runID := createRun(t, RecipeSuccess)
+		unlock, err := runCollection.LockRun(context.Background(), runID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, unlock()) }()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+
+		updated, err := runCollection.PersistRunSize(ctx, runID)
+
+		expectedErr := message.New(message.EngineRunBusy).WithMetadata(map[string]string{"runID": runID.Value})
+		require.False(t, updated)
+		require.Equal(t, expectedErr, err)
+		metadata, readErr := runCollection.readMetadata(runID)
+		require.NoError(t, readErr)
+		require.Nil(t, metadata.SizeBytes)
+	})
+
+	t.Run("allows concurrent readers while calculating the run size", func(t *testing.T) {
+		runCollection, runID := createRun(t, RecipeSuccess)
+		unlock, err := runCollection.RLockRun(context.Background(), runID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, unlock()) }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
+		sizeBytes, err := runCollection.calculateRunSizeLocked(ctx, runID)
+
+		require.NoError(t, err)
+		require.NotNil(t, sizeBytes)
+	})
+
+	t.Run("persists while the run lease is held", func(t *testing.T) {
+		runCollection, runID := createRun(t, RecipeSuccess)
+		release, err := runCollection.LeaseRun(context.Background(), runID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, release()) }()
+
+		updated, err := runCollection.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+
+		metadata, err := runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+	})
+}
+
+func TestAdjustSizeForMetadataAccountsForDigitGrowth(t *testing.T) {
+	previousSizeBytesA := uint64(9)
+	previousSizeBytesB := uint64(1000)
+	tests := []struct {
+		name         string
+		metadata     cdf.Metadata
+		newSizeBytes uint64
+		expected     uint64
+	}{
+		{
+			name:         "adding size field increases digit count",
+			metadata:     cdf.Metadata{},
+			newSizeBytes: 982,
+			expected:     1004,
+		},
+		{
+			name:         "updating size field increases digit count",
+			metadata:     cdf.Metadata{SizeBytes: &previousSizeBytesA},
+			newSizeBytes: 998,
+			expected:     1001,
+		},
+		{
+			name:         "updating size field decreases digit count",
+			metadata:     cdf.Metadata{SizeBytes: &previousSizeBytesB},
+			newSizeBytes: 11,
+			expected:     8,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adjusted, err := adjustSizeForMetadata(test.metadata, test.newSizeBytes)
+
+			require.NoError(t, err)
+			require.Equal(t, test.expected, adjusted)
+		})
+	}
 }
 
 func TestRunAccessorFunctions_RunCollection(t *testing.T) {

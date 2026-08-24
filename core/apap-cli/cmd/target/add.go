@@ -96,15 +96,14 @@ func newAddCommand(cc client.ClientConnector, targetService target.TargetManager
 		},
 	}
 	addCmd.Flags().StringArrayVar(&parsed.jumpLoginStrings, "jump", []string{},
-		"Connect via one or more jump hosts before reaching the target. A jump flag is required for each jump using the same target string syntax "+
-			"as for the final destination. This is a shortcut for jump host setup. Use the JSON interface for advanced configuration")
+		"Connect via one or more jump nodes before reaching the target. A jump flag is required for each jump using the same target string syntax "+
+			"as for the final destination. This is a shortcut for jump node setup. Use the JSON interface for advanced configuration")
 	addCmd.Flags().StringVar(&parsed.name, "name", "", "Optional target name")
 	addCmd.Flags().BoolVar(&parsed.setDefault, "default", false, "Set the target to the default, meaning it will be used by default for all commands unless overridden by the --target flag.")
-	addCmd.Flags().BoolVar(&parsed.findPrivateKey, "find-keys", false, "Find the first SSH keys compatible with the target and any jump hosts when adding the target (note this requires connecting to the target and any jump hosts).")
+	addCmd.Flags().BoolVar(&parsed.findPrivateKey, "find-keys", false, "Find the first SSH keys compatible with the target and any jump nodes when adding the target (note this requires connecting to the target and any jump nodes).")
 	addCmd.Flags().StringVar(&parsed.hostKeyPolicy, "host-key-policy", "ask", "Control host key checking: 'ask', 'strict', 'accept-new', or 'ignore'")
-	addCmd.Flags().BoolVar(&provisionKey, "provision-key", false, "Automatically provision an SSH key by specifying your SSH password when prompted (TTY by default; if stdin is piped, read from stdin). "+
-		"A new RSA 2048 key pair will be created, added to authorized_keys on the remote target, and added to the local known_hosts file. The target must be online for this operation to succeed.")
-
+	addCmd.Flags().BoolVar(&provisionKey, "provision-key", false, "Automatically create and install an SSH key on the target using the SSH password entered when prompted (TTY by default; if stdin is piped, read from stdin). "+
+		"A new RSA 2048 key pair will be created, added to authorized_keys on the target, and added to the local known_hosts file. The target must be online for this operation to succeed. This flag cannot be used with jump nodes.")
 	_ = addCmd.MarkFlagRequired("user")
 
 	return addCmd
@@ -264,6 +263,10 @@ func addSSHTargetConfig(cc client.ClientConnector, args AddTargetArgs, targetSer
 			return err
 		}
 		args.name = generatedTargetName
+	}
+
+	if provisionKey && len(tgt.Jumps) > 1 {
+		return message.New(message.CliCmdValidationProvisionKeyWithJumps)
 	}
 
 	if provisionKey && tgt.LastJump().PrivateKeyFilename != "" {

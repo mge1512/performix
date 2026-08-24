@@ -364,6 +364,35 @@ func TestAddCommandFindPrivateKey(t *testing.T) {
 
 }
 
+func TestAddCommandProvisionKeyRejectsJumpHosts(t *testing.T) {
+	t.Run("jump flag", func(t *testing.T) {
+		cmd := newAddCommand(nil, &target.MockTargetManager{}, &ssh.MockSSHKeyProvisioner{})
+		cmd.SetArgs([]string{
+			testTargetUser + "@111.111.111.111",
+			"--jump", "jumpuser@222.222.222.222:22:/jump/key",
+			"--name", testTargetName,
+			"--provision-key",
+		})
+
+		err := cmd.Execute()
+
+		var msgErr message.Message
+		require.ErrorAs(t, err, &msgErr)
+		assert.Equal(t, message.CliCmdValidationProvisionKeyWithJumps, msgErr.Code())
+	})
+
+	t.Run("JSON target", func(t *testing.T) {
+		cmd := newAddCommand(nil, &target.MockTargetManager{}, &ssh.MockSSHKeyProvisioner{})
+		cmd.SetArgs([]string{testJSONTargetString, "--name", testTargetName, "--provision-key"})
+
+		err := cmd.Execute()
+
+		var msgErr message.Message
+		require.ErrorAs(t, err, &msgErr)
+		assert.Equal(t, message.CliCmdValidationProvisionKeyWithJumps, msgErr.Code())
+	})
+}
+
 func TestAddCommandHostKeyPolicyValues(t *testing.T) {
 	validValues := []string{"ask", "strict", "accept-new", "ignore"}
 	invalidValues := []string{"", "foo", "true", "false", "yess", "none"}

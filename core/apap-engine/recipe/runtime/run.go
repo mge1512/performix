@@ -19,6 +19,7 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/parameters"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipe"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipe/stages"
+	"github.com/Arm-Debug/apap-cli/apap-engine/run"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool/deployer"
 	"github.com/Arm-Debug/apap-cli/apap-engine/util"
@@ -101,13 +102,12 @@ func (f *RunStageFactory) BuildStages(config *StageConfiguration, notifier notif
 		config.CollectionState.TargetInfoCollector.TargetCollectorOutput = o
 	}, hostFs, agentSupplier, connectStage.TargetSessionSupplier, targetArchitectureStage.TargetPlatformSupplier)
 
-	collectTargetPIDStage := stages.NewCollectTargetPIDStage(func() string {
-		return config.CollectionState.TargetInfoCollector.TargetPIDCollectionPath
-	}, agentSupplier, func(o util.Named[recipe.CollectorOutput]) {
-		config.CollectionState.TargetInfoCollector.TargetPIDCollectorOutput = o
-	}, hostFs)
+	collectTargetPIDStage := stages.NewCollectTargetPIDStage(
+		agentSupplier,
+		hostFs,
+		config.CollectionState.RunManifestUpdater,
+	)
 
-	// First add the generic stages
 	s = append(s, collectTargetInfoStage, collectTargetPIDStage)
 
 	// Validate PID if the user has selected a per-process workload
@@ -156,7 +156,7 @@ func (f *RunStageFactory) BuildStages(config *StageConfiguration, notifier notif
 	s = append(s, releaseTargetLockStage)
 	if config.TransferManagerEnabled {
 		tm := collector.FileRetriever.(*recipe.TransferManagerRetriever).TransferManager
-		waitForTransfersStage := stages.NewWaitForTransfersStage(tm)
+		waitForTransfersStage := stages.NewWaitForTransfersStage(tm, config.OnPhase1TransferComplete)
 		s = append(s, waitForTransfersStage)
 	} else {
 		// Fall back to old RetrieveAgentFiles path
@@ -203,6 +203,7 @@ func RunRecipe(
 	notifier notifiers.StageNotifier,
 	recipeCommandMap cmdsync.CommandStateMap,
 ) (err error) {
+	newRunID := run.InvalidRunID
 	logWithFields := logx.FromContext(ctx).WithFields(log.Fields{
 		"Recipe Name":    config.Ctx.RecipeMetadata.Name,
 		"Output":         config.Ctx.OutputDir,
@@ -210,7 +211,17 @@ func RunRecipe(
 		"DeploymentType": config.ToolDeploymentType,
 	})
 	logWithFields.Info("Recipe run starting")
-	defer func() { logWithFields.Info("Recipe run complete") }()
+	defer func() {
+		if err != nil {
+			logWithFields.WithError(err).Error("Recipe run failed")
+		}
+		logWithFields.Info("Recipe run complete")
+		if newRunID != run.InvalidRunID {
+			if _, sizeErr := config.RunCollection.PersistRunSize(ctx, newRunID); sizeErr != nil {
+				logWithFields.WithError(sizeErr).Warn("Could not persist run size")
+			}
+		}
+	}()
 
 	config.OperationName = fmt.Sprintf("recipe run %s", config.Ctx.RecipeMetadata.Name)
 	config.ConfigureRunManifestUpdater()
@@ -220,7 +231,7 @@ func RunRecipe(
 	ss, executionContext := stageFactory.BuildStages(config, notifier)
 
 	// Update the CollectionState's run builder - this will be propagated to the exec context's collector
-	newRunID, release, err := config.CollectionState.CreateRun(ctx, config.RunCollection, config.Ctx)
+	newRunID, release, err := config.CollectionState.CreateRun(ctx, config.RunCollection, config.Ctx, notifier)
 	if err != nil {
 		return err
 	}
@@ -270,6 +281,15 @@ func RunRecipe(
 
 	err = util.JoinErrors(err, config.RunCollection.SetRunEndTime(ctx, newRunID))
 	err = util.JoinErrors(err, config.RunCollection.UpdateRunResult(ctx, newRunID, runResult, err))
+
+	logEntry := logx.FromContext(ctx).WithFields(log.Fields{
+		"run_id":     newRunID.Value,
+		"run_result": runResult,
+	})
+	if err != nil {
+		logEntry = logEntry.WithError(err)
+	}
+	logEntry.Info("Finalized recipe run metadata")
 
 	return err
 }

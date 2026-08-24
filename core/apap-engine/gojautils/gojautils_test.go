@@ -167,6 +167,20 @@ func TestParseAndAdjustFrame(t *testing.T) {
 		assert.Equal(t, 29-HelperInjectedLineCount(), frame.Line)
 		assert.Equal(t, 4, frame.Column)
 	})
+
+	t.Run("preserves dependency filename and line", func(t *testing.T) {
+		ah := &AsyncHelper{
+			SourceFileName: "/tmp/entry.js",
+			LineOffset:     HelperInjectedLineCount(),
+		}
+
+		frame, ok := ah.parseAndAdjustFrame("\tat fail (/tmp/dependency.js:7:4)")
+		require.True(t, ok)
+		assert.Equal(t, "dependency.js", frame.File)
+		assert.Equal(t, "fail", frame.Function)
+		assert.Equal(t, 7, frame.Line)
+		assert.Equal(t, 4, frame.Column)
+	})
 }
 
 func TestSetPerformixGlobal(t *testing.T) {
@@ -266,6 +280,74 @@ func TestCallScriptedFunction(t *testing.T) {
 	})
 }
 
+func TestCallScriptedFunctionWithReceiver(t *testing.T) {
+	ah := &AsyncHelper{
+		Loop: eventloop.NewEventLoop(),
+		Ctx:  context.Background(),
+	}
+	ah.Loop.Run(func(r *goja.Runtime) { ah.Vm = r })
+
+	_, err := ah.Vm.RunString(`
+		function getValue() {
+			return this.value;
+		}
+
+		var module = {
+			exports: {
+				value: 42,
+				getValue,
+			},
+		};
+	`)
+	require.NoError(t, err)
+
+	exports := ah.Vm.Get("module").ToObject(ah.Vm).Get("exports")
+	getValue := exports.ToObject(ah.Vm).Get("getValue").Export().(func(goja.FunctionCall) goja.Value)
+
+	ah.StartLoop()
+	defer ah.StopLoop()
+
+	result, err := ah.CallScriptedFunctionWithReceiver(getValue, nil, exports)
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), result.ToInteger())
+}
+
+func TestExecuteFunction(t *testing.T) {
+	vm := goja.New()
+
+	_, err := vm.RunString(`
+		function add(left, right) {
+			return left + right
+		}
+	`)
+	require.NoError(t, err)
+
+	add := vm.Get("add").Export().(func(goja.FunctionCall) goja.Value)
+	out, err := ExecuteFunction(vm, add, []goja.Value{vm.ToValue(20), vm.ToValue(22)}, goja.Undefined())
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), out.ToInteger())
+}
+
+func TestExecuteFunctionReturnsJavaScriptException(t *testing.T) {
+	vm := goja.New()
+
+	_, err := vm.RunString(`
+		function fail() {
+			throw new Error("something went wrong")
+		}
+	`)
+	require.NoError(t, err)
+
+	fail := vm.Get("fail").Export().(func(goja.FunctionCall) goja.Value)
+	_, err = ExecuteFunction(vm, fail, []goja.Value{}, goja.Undefined())
+	require.Error(t, err)
+
+	var exception *goja.Exception
+	require.ErrorAs(t, err, &exception)
+	assert.Contains(t, exception.Error(), "something went wrong")
+}
+
 func TestCallScriptedFunction_PanicReporting(t *testing.T) {
 	t.Run("synchronous engine error is reported", func(t *testing.T) {
 		ah := &AsyncHelper{
@@ -276,7 +358,7 @@ func TestCallScriptedFunction_PanicReporting(t *testing.T) {
 		}
 		ah.Loop.Run(func(r *goja.Runtime) { ah.Vm = r })
 
-		_, err := ah.Vm.RunString(InjectAsyncHelpers(`
+		_, err := ah.Vm.RunScript(ah.SourceFileName, InjectAsyncHelpers(`
 		function testFunc() {
 			let out = goFunc()
 		}
@@ -303,7 +385,7 @@ func TestCallScriptedFunction_PanicReporting(t *testing.T) {
 		}
 		ah.Loop.Run(func(r *goja.Runtime) { ah.Vm = r })
 
-		_, err := ah.Vm.RunString(InjectAsyncHelpers(
+		_, err := ah.Vm.RunScript(ah.SourceFileName, InjectAsyncHelpers(
 			`async function testFunc() {
 			
 			let out = goFunc()
@@ -331,7 +413,7 @@ func TestCallScriptedFunction_PanicReporting(t *testing.T) {
 		}
 		ah.Loop.Run(func(r *goja.Runtime) { ah.Vm = r })
 
-		_, err := ah.Vm.RunString(InjectAsyncHelpers(
+		_, err := ah.Vm.RunScript(ah.SourceFileName, InjectAsyncHelpers(
 			`async function testFunc() { const out = goFunc() }`))
 		require.NoError(t, err)
 

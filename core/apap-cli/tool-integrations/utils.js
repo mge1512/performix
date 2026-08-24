@@ -5,6 +5,14 @@ const { getExecutableFromWorkload } = require('./workload');
 const readinessMessageCode =
   'engine.recipeparser.js_recipe_stage.READINESS_MESSAGE';
 
+/**
+ * @param {number} milliseconds
+ * @returns {Promise<void>}
+ */
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 // Stable Linux process capabilities
 // See: https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h
 const LINUX_PROC_CAPABILITY_MAP = {
@@ -21,12 +29,8 @@ const LINUX_PROC_CAPABILITY_MAP = {
  * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice>}
  */
 async function probePython(engine, versionMajor, versionMinor, toolName) {
-  // check python is present. Note we have to use "bash -c" instead of just running "python3 --version"
-  // as execCommand will error if the command is not found. Should the agent have a "command exists" method?
-  const pyCheck = await engine.execCommand(
-    ['bash', '-c', 'python3 --version'],
-    {},
-  );
+  // Check Python is present.
+  const pyCheck = await engine.execCommand(['python3', '--version'], {});
   if (pyCheck.rc !== 0) {
     return {
       level: 'error',
@@ -140,7 +144,20 @@ async function probePythonVenv(engine, versionMajor, versionMinor, toolName) {
  * @returns {Promise<boolean>} - True if the path exists, false otherwise
  */
 async function pathExists(engine, path) {
-  const checkResult = await engine.execCommand(['stat', path], {});
+  let checkResult;
+  if (engine.getPlatform().OS === 'Windows') {
+    checkResult = await engine.execCommand(
+      [
+        'powershell',
+        '-NoProfile',
+        '-Command',
+        `if (Test-Path -LiteralPath $env:APX_TEST_PATH) { exit 0 } else { exit 1 }`,
+      ],
+      { environment: { APX_TEST_PATH: path } },
+    );
+  } else {
+    checkResult = await engine.execCommand(['stat', path], {});
+  }
   return checkResult.rc === 0;
 }
 
@@ -252,16 +269,31 @@ async function isPerfCapable(engine) {
     return null;
   }
 
-  // 0. Read CapEff from /proc/$PPID/status (agent process)
+  // 0. Find the target agent's PID from the command's parent PID, then read the
+  // agent's effective capabilities. Read the parent directly because a child
+  // executable can lose capabilities during exec.
   // Format is `CapEff: hexadecimal_value`
   // See: https://man7.org/linux/man-pages/man5/proc_pid_status.5.html
-  const statusCmd = [
-    'bash',
-    '-c',
-    'grep "^CapEff:" /proc/${PPID}/status | cut -f2',
-  ];
+  const childStatusCmd = ['cat', '/proc/self/status'];
+  const childStatusResult = await engine.execCommand(childStatusCmd, {});
+  const parentPidMatch = childStatusResult.stdout.match(/^PPid:\s*(\d+)\s*$/m);
+  if (childStatusResult.rc !== 0 || parentPidMatch === null) {
+    throw {
+      code: 'tool_integrations.common.PRIVILEGE_CHECK_FAILED_PERF_CAPS',
+      metadata: {
+        capabilities: 'cap_perfmon, cap_sys_admin',
+        cmd: childStatusCmd.join(' '),
+        exitCode: childStatusResult.rc,
+      },
+    };
+  }
+
+  const statusCmd = ['cat', `/proc/${parentPidMatch[1]}/status`];
   const statusResult = await engine.execCommand(statusCmd, {});
-  if (statusResult.rc !== 0 || statusResult.stdout.trim() === '') {
+  const capEffMatch = statusResult.stdout.match(
+    /^CapEff:\s*([0-9a-fA-F]+)\s*$/m,
+  );
+  if (statusResult.rc !== 0 || capEffMatch === null) {
     throw {
       code: 'tool_integrations.common.PRIVILEGE_CHECK_FAILED_PERF_CAPS',
       metadata: {
@@ -272,16 +304,21 @@ async function isPerfCapable(engine) {
     };
   }
 
-  const capEff = statusResult.stdout.trim();
+  const capEff = capEffMatch[1];
 
   // 1. Decode using `capsh`
   const capshResult = await engine.execCommand(
-    ['bash', '-c', `capsh --decode=${capEff} | cut -d= -f2`],
+    ['capsh', `--decode=${capEff}`],
     {},
   );
   if (capshResult.rc === 0) {
-    const capNames = capshResult.stdout
-      .trim()
+    const decodedCapabilities = capshResult.stdout.trim();
+    const separatorIndex = decodedCapabilities.indexOf('=');
+    const capabilityList =
+      separatorIndex === -1
+        ? decodedCapabilities
+        : decodedCapabilities.slice(separatorIndex + 1);
+    const capNames = capabilityList
       .split(',')
       .map((name) => name.trim())
       .filter((name) => name.length > 0);
@@ -342,6 +379,26 @@ async function resolveLoginName(engine) {
   throw {
     code: 'tool_integrations.common.LOGIN_NAME_NOT_FOUND',
     metadata: { lognameRc: lognameCmd.rc, envRc: envCmd.rc },
+  };
+}
+
+/**
+ * Gets the primary group for the specified user on the target connection.
+ *
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param {string} loginName
+ * @returns {Promise<string>}
+ */
+async function getPrimaryGroup(engine, loginName) {
+  const cmd = ['id', '-gn', loginName];
+  const result = await engine.execCommand(cmd, {});
+  if (result.rc === 0) {
+    return result.stdout.trim();
+  }
+  throw {
+    code: 'tool_integrations.common.GET_PRIMARY_GROUP_FAILED',
+    metadata: { username: loginName, cmd: cmd.join(` `), exitCode: result.rc },
+    cause: result.stderr,
   };
 }
 
@@ -429,9 +486,10 @@ function isElevatePrivilegeError(err) {
  */
 async function normalizeRootOutputAccess(engine, outputPath, recursive) {
   const loginName = await resolveLoginName(engine);
+  const primaryGroup = await getPrimaryGroup(engine, loginName);
   const chownArgs = recursive
-    ? ['chown', '-R', `${loginName}:${loginName}`, outputPath]
-    : ['chown', `${loginName}:${loginName}`, outputPath];
+    ? ['chown', '-R', `${loginName}:${primaryGroup}`, outputPath]
+    : ['chown', `${loginName}:${primaryGroup}`, outputPath];
   const chmodArgs = recursive
     ? ['chmod', '-R', 'u+rwX,go+rX', outputPath]
     : ['chmod', 'u+rwX,go+rX', outputPath];
@@ -497,5 +555,7 @@ module.exports = {
   isElevatePrivilegeError,
   normalizeRootOutputAccess,
   posixTestWorkload,
+  resolveWorkloadPath,
   buildToolBundlePath,
+  delay,
 };

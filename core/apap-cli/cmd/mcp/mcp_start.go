@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +21,27 @@ import (
 
 type MCPRunner interface {
 	Run(ctx context.Context, in io.ReadCloser, out io.Writer, errOut io.Writer) error
+}
+
+var errMCPShutdownSignal = errors.New("MCP shutdown signal received")
+
+// signalCauseContext records when a signal cancels the command. This lets
+// shutdown distinguish a signal from stdin closure or caller cancellation.
+func signalCauseContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-signals:
+			cancel(errMCPShutdownSignal)
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(signals)
+		cancel(context.Canceled)
+	}
 }
 
 func newMCPStartCmd(runner MCPRunner) *cobra.Command {
@@ -32,7 +56,12 @@ func newMCPStartCmd(runner MCPRunner) *cobra.Command {
 			grouping.GroupAnnotation: grouping.GroupMCPSub,
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			err := runner.Run(cmd.Context(), readCloser(cmd.InOrStdin()), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			// Signals cancel the same context used by stdin and caller cancellation,
+			// so all termination paths run the engine shutdown sequence.
+			ctx, stop := signalCauseContext(cmd.Context())
+			defer stop()
+
+			err := runner.Run(ctx, readCloser(cmd.InOrStdin()), cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				wrappedErr := fmt.Errorf("failed to start MCP server: %w", err)
 				clijson.HandleCLIError(cmd.ErrOrStderr(), wrappedErr)

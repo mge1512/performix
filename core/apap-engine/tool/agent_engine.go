@@ -6,6 +6,7 @@ package tool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/agent"
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
+	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
 	"github.com/Arm-Debug/apap-cli/apap-engine/logging/logx"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/notifiers"
@@ -36,8 +38,9 @@ func NewAgentEngine(
 	userMessageWriter run.UserMessageWriter,
 	preserveTempDirs bool,
 	rootWorkerEnabled bool,
+	targetPlatform conductor.PlatformConfiguration,
 ) (*AgentEngine, func()) {
-	ps := privilege.NewPrivilegeSession(client)
+	ps := privilege.NewPrivilegeSession(client, targetPlatform.OS)
 
 	ae := &AgentEngine{
 		client:                client,
@@ -48,6 +51,7 @@ func NewAgentEngine(
 		preserveTemporaryDirs: preserveTempDirs,
 		rootWorkerEnabled:     rootWorkerEnabled,
 		privilegeSession:      ps,
+		targetPlatform:        targetPlatform,
 	}
 	return ae, ae.Cleanup
 }
@@ -66,9 +70,13 @@ func (g *AgentEngine) Cleanup() {
 
 	wg := sync.WaitGroup{}
 	if !g.preserveTemporaryDirs {
-		wg.Add(len(g.tempDirs))
+		g.tempDirsMu.Lock()
+		tempDirs := append([]string(nil), g.tempDirs...)
+		g.tempDirsMu.Unlock()
+
+		wg.Add(len(tempDirs))
 		// Remove any directories created by the engine
-		for _, d := range g.tempDirs {
+		for _, d := range tempDirs {
 			go func(dirToRemove string) {
 				defer wg.Done()
 				if err := g.rmTempDir(cleanupCtx, dirToRemove); err != nil {
@@ -127,9 +135,9 @@ func (g *AgentEngine) selectCleanupContext() context.Context {
 }
 
 type TransferOptions struct {
-	ImmediateRetrieval bool
-	Exclude            []string
-	BackgroundTransfer bool
+	ImmediateRetrieval bool     `json:"immediateRetrieval,omitempty"`
+	Exclude            []string `json:"exclude,omitempty"`
+	BackgroundTransfer bool     `json:"backgroundTransfer,omitempty"`
 }
 
 type FileCollector interface {
@@ -144,16 +152,22 @@ type AgentEngine struct {
 	execCtx                 context.Context
 	cleanupCtx              context.Context
 	stagesInFlight          []string
+	tempDirsMu              sync.Mutex
 	tempDirs                []string
 	preserveTemporaryDirs   bool
 	hostFiles               []*hostFileHandle
 	userMessageWriter       run.UserMessageWriter
 	procsToRelease          []int32
 	privilegeProcsToRelease []int32
+	targetPlatform          conductor.PlatformConfiguration
 
 	// Privilege
 	rootWorkerEnabled bool
 	privilegeSession  privilege.PrivilegeSession
+}
+
+func (g *AgentEngine) GetPlatform() conductor.PlatformConfiguration {
+	return g.targetPlatform
 }
 
 type hostFileHandle struct {
@@ -265,8 +279,25 @@ func (g *AgentEngine) CreateTempDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	g.tempDirsMu.Lock()
 	g.tempDirs = append(g.tempDirs, resp.Path)
+	g.tempDirsMu.Unlock()
 	return resp.Path, nil
+}
+
+// PreserveTempDir excludes a temporary directory created by this engine from
+// cleanup. Only paths returned by CreateTempDir can be preserved.
+func (g *AgentEngine) PreserveTempDir(path string) error {
+	g.tempDirsMu.Lock()
+	defer g.tempDirsMu.Unlock()
+
+	for i, tempDir := range g.tempDirs {
+		if tempDir == path {
+			g.tempDirs = append(g.tempDirs[:i], g.tempDirs[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("temporary directory %q is not managed by this engine", path)
 }
 
 func (g *AgentEngine) Mkdir(path string) error {
@@ -387,7 +418,7 @@ func (g *AgentEngine) ReadHostFile(path string) (string, error) {
 func (g *AgentEngine) closeHostFiles() {
 	for _, handle := range g.hostFiles {
 		if err := handle.Close(); err != nil {
-			logx.FromContext(g.execCtx).Warnf("failed to close host file %s: %v", handle.Path(), err)
+			logx.FromContext(g.execCtx).Warnf("failed to close host file %s: %v", handle.path, err)
 		}
 	}
 }
@@ -438,6 +469,6 @@ func (h *hostFileHandle) Close() error {
 	return h.closeErr
 }
 
-func (h *hostFileHandle) Path() string {
-	return h.path
+func (h *hostFileHandle) Path() (string, error) {
+	return h.path, nil
 }

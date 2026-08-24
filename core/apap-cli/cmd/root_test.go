@@ -4,8 +4,10 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -41,6 +43,24 @@ func TestFlagsDoNotConflict(t *testing.T) {
 	executeAndCheck(t, command, []string{"version", "-h"})
 
 	executeAndCheck(t, command, []string{"target", "-h"})
+}
+
+func TestDaemonAutostartFlagHiddenFromHelp(t *testing.T) {
+	for _, args := range [][]string{
+		{"daemon", "start", "--help"},
+		{"daemon", "stop", "--help"},
+	} {
+		var output bytes.Buffer
+		command := NewRootCmd()
+		command.SetOut(&output)
+		command.SetErr(&output)
+		command.SetArgs(args)
+
+		err := command.Execute()
+
+		assert.NoError(t, err)
+		assert.NotContains(t, strings.ToLower(output.String()), serverconfig.DaemonAutostartConfigKey)
+	}
 }
 
 func TestDetermineExitCodeForError(t *testing.T) {
@@ -97,4 +117,5 @@ func TestInitConfigSetsDefaults(t *testing.T) {
 	assert.Equal(t, serverconfig.DefaultEnableAndroidTargets, viper.GetBool(serverconfig.EnableAndroidTargetsConfigKey))
 	assert.Equal(t, serverconfig.DefaultEnableRenderDBSandbox, viper.GetBool("enable-render-db-sandbox"))
 	assert.Equal(t, serverconfig.DefaultEnableNeoprofTimeline, viper.GetBool("enable-neoprof-timeline"))
+	assert.Equal(t, serverconfig.DefaultDaemonAutostart, viper.GetBool(serverconfig.DaemonAutostartConfigKey))
 }

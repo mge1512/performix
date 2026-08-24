@@ -71,6 +71,8 @@ type ToolIntegration interface {
 	Stop() error
 	Cancel() error
 	Reformat() error
+	// CollectionFinished is closed when collection has finished, or nil if the integration does not report it.
+	CollectionFinished() <-chan struct{}
 }
 
 type WorkloadType int

@@ -93,3 +93,42 @@ func TestParseDataSourcesFromConfig(t *testing.T) {
 		assert.Equal(t, 1, dtr.ContentIndex)
 	})
 }
+
+func TestParseDependenciesFromConfig(t *testing.T) {
+	t.Run("Parsing succeeds for table and renderer dependencies", func(t *testing.T) {
+		jsonStr := `{"data_source": {"tables": {"default":[{"renderer_id": "foo", "output": "bar", "content_index": 1}]}, "renderers": [{"renderer_id": "sl_analyze"}]}}`
+
+		result, err := ParseDependenciesFromConfig(jsonStr)
+		assert.NoError(t, err)
+
+		dtr, ok := result.Tables["default"][0].(*OutputTableRef)
+		assert.True(t, ok)
+		assert.Equal(t, "foo", dtr.RendererID)
+		assert.Equal(t, "bar", dtr.Output)
+		assert.Equal(t, 1, dtr.ContentIndex)
+		assert.Equal(t, []RendererDependency{{RendererID: "sl_analyze"}}, result.Renderers)
+	})
+
+	t.Run("Parsing succeeds for renderer dependencies without table dependencies", func(t *testing.T) {
+		jsonStr := `{"data_source": {"renderers": [{"renderer_id": "sl_analyze"}]}}`
+
+		result, err := ParseDependenciesFromConfig(jsonStr)
+		assert.NoError(t, err)
+
+		assert.Nil(t, result.Tables)
+		assert.Equal(t, []RendererDependency{{RendererID: "sl_analyze"}}, result.Renderers)
+	})
+
+	t.Run("Parsing succeeds for table dependencies without renderer dependencies", func(t *testing.T) {
+		jsonStr := `{"data_source": {"tables": {"default":[{"renderer_id": "foo", "output": "bar"}]}}}`
+
+		result, err := ParseDependenciesFromConfig(jsonStr)
+		assert.NoError(t, err)
+
+		dtr, ok := result.Tables["default"][0].(*OutputTableRef)
+		assert.True(t, ok)
+		assert.Equal(t, "foo", dtr.RendererID)
+		assert.Equal(t, "bar", dtr.Output)
+		assert.Empty(t, result.Renderers)
+	})
+}

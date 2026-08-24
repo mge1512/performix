@@ -3,10 +3,10 @@
 
 package versions
 
-// Update the release version or release candidate strings to change the neoprof artifacts pulled from artifactory and used by APX.
+// sl-analyze comes from standalone sl-analyze assets.
 // Consider scripts/get-tools.py before changing the name of these variables.
-const NeoprofVersion = "2.1.0"
-const NeoprofReleaseCandidate = "build-1"
+const SlAnalyzeVersion = "2.2.0"
+const SlAnalyzeBuildNumber = "build-4"
 
-// Android sl-record comes from the standalone NDK gatord archive.
-const AndroidSlRecordVersion = "2.1.0.v20260619_1444-neoprof"
+// sl-record comes from standalone gatord archives.
+const SlRecordVersion = "2.2.0.v20260729_1543-neoprof"

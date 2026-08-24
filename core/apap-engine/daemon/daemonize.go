@@ -9,8 +9,10 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/ARM-software/golang-utils/utils/filesystem"
@@ -20,6 +22,68 @@ import (
 )
 
 type Daemon struct{}
+
+type StartedProcess struct {
+	pid     int
+	cmd     *exec.Cmd
+	done    chan struct{}
+	mu      sync.Mutex
+	exited  bool
+	waitErr error
+}
+
+func newStartedProcess(cmd *exec.Cmd) *StartedProcess {
+	process := &StartedProcess{
+		pid:  cmd.Process.Pid,
+		cmd:  cmd,
+		done: make(chan struct{}),
+	}
+	go func() {
+		waitErr := cmd.Wait()
+		process.mu.Lock()
+		process.waitErr = waitErr
+		process.exited = true
+		process.mu.Unlock()
+		close(process.done)
+	}()
+	return process
+}
+
+func (p *StartedProcess) PID() int {
+	if p == nil {
+		return 0
+	}
+	return p.pid
+}
+
+func (p *StartedProcess) KillAndWait() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	if p.exited {
+		err := p.waitErr
+		p.mu.Unlock()
+		return err
+	}
+	killErr := p.cmd.Process.Kill()
+	p.mu.Unlock()
+	waitErr := p.Wait()
+	if killErr == nil {
+		return nil
+	}
+	return errors.Join(killErr, waitErr)
+}
+
+func (p *StartedProcess) Wait() error {
+	if p == nil {
+		return nil
+	}
+	<-p.done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.waitErr
+}
 
 // Find the process and kill it given PID
 func (d *Daemon) killPid(pid int) error {
@@ -64,42 +128,95 @@ func (d *Daemon) Kill(pidfile string) error {
 
 // Start runs given command in the background and ensures it didn't exit prematurely.
 func (d *Daemon) Start(commandName string, args []string) (pid int, err error) {
-	pid, err = start(commandName, args)
+	process, err := d.start(commandName, args, true, false)
 	if err != nil {
-		log.WithFields(log.Fields{"err": err}).Error("Unable to start daemon process")
+		return 0, err
+	}
+	return process.PID(), nil
+}
+
+// StartAttached runs the command in the caller's process group, so group
+// signals reach the command. It also redirects the daemon's stderr to the
+// caller's stderr.
+func (d *Daemon) StartAttached(commandName string, args []string) (pid int, err error) {
+	process, err := d.start(commandName, args, false, true)
+	if err != nil {
+		return 0, err
+	}
+	return process.PID(), nil
+}
+
+// StartProcess runs given command in the background and returns a handle for
+// callers that need to retain lifecycle ownership of the spawned process.
+func (d *Daemon) StartProcess(commandName string, args []string) (*StartedProcess, error) {
+	return d.start(commandName, args, true, false)
+}
+
+// StartAttachedProcess runs the command in the caller's process group and
+// returns a handle for lifecycle management.
+func (d *Daemon) StartAttachedProcess(commandName string, args []string) (*StartedProcess, error) {
+	return d.start(commandName, args, false, true)
+}
+
+func (d *Daemon) start(commandName string, args []string, isolateProcess bool, logLateExit bool) (process *StartedProcess, err error) {
+	process, err = start(commandName, args, isolateProcess, logLateExit)
+	if err != nil {
+		return
 	} else {
-		log.WithFields(log.Fields{"PID": pid}).Debug("Daemon process started")
+		log.WithFields(log.Fields{"PID": process.PID()}).Debug("Daemon process started")
 	}
 	return
 }
 
 const WaitForExitStatusDuration = 100 * time.Millisecond
 
-func start(commandName string, args []string) (pid int, err error) {
+func start(commandName string, args []string, isolateProcess bool, logLateExit bool) (process *StartedProcess, err error) {
 	cmd := exec.Command(commandName, args...)
+	if isolateProcess {
+		isolateDaemonProcess(cmd)
+	} else {
+		cmd.Stderr = os.Stderr
+	}
 	err = cmd.Start()
 	if err != nil {
 		return
 	}
-	err = checkIsRunning(cmd, WaitForExitStatusDuration)
+	process = newStartedProcess(cmd)
+	err = checkIsRunning(process, WaitForExitStatusDuration, logLateExit)
 	if err != nil {
-		return
+		return nil, err
 	}
-	pid = cmd.Process.Pid
 	return
 }
 
-func checkIsRunning(cmd *exec.Cmd, waitDuration time.Duration) error {
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
+func checkIsRunning(process *StartedProcess, waitDuration time.Duration, logLateExit bool) error {
 	select {
-	case err := <-done:
-		return err
+	case <-process.done:
+		return process.Wait()
 	case <-time.After(waitDuration):
+		if logLateExit {
+			go logAttachedProcessExit(process)
+		}
 		return nil
 	}
+}
+
+func logAttachedProcessExit(process *StartedProcess) {
+	err := process.Wait()
+	cmd := process.cmd
+	fields := log.Fields{}
+	if cmd.Process != nil {
+		fields["PID"] = cmd.Process.Pid
+	}
+	if cmd.ProcessState != nil {
+		fields["exit-code"] = cmd.ProcessState.ExitCode()
+	}
+	entry := log.WithFields(fields)
+	if err != nil {
+		entry.WithError(err).Error("Attached daemon process exited with an error")
+		return
+	}
+	entry.Info("Attached daemon process exited")
 }
 
 func NewDaemon() *Daemon {

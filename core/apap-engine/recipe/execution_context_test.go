@@ -14,7 +14,12 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/agent"
+	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
+	"github.com/Arm-Debug/apap-cli/apap-engine/cdf/semver"
 	"github.com/Arm-Debug/apap-cli/apap-engine/conductor"
+	"github.com/Arm-Debug/apap-cli/apap-engine/locality"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
+	"github.com/Arm-Debug/apap-cli/apap-engine/run"
 	"github.com/Arm-Debug/apap-cli/apap-engine/targetsession"
 	targetsessionmocks "github.com/Arm-Debug/apap-cli/apap-engine/targetsession/mocks"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool"
@@ -29,23 +34,162 @@ func TestRunExecutionContext_TargetInfo_NilSupplier(t *testing.T) {
 	require.Nil(t, ctx.TargetInfo())
 }
 
+func TestGetToolCapabilities(t *testing.T) {
+	t.Run("returns recorded capabilities", func(t *testing.T) {
+		expected := run.ToolCapabilities{
+			"one": {
+				State:         "available",
+				Payload:       map[string]any{"enabled": true},
+				ComponentType: cdf.ComponentType{Name: "abc", SchemaVersion: "123"},
+			},
+		}
+		ctx := &RunExecutionContext{
+			RunDescriptions: []*run.RunDescription{
+				{ToolsUsed: []cdf.ToolUsed{{Tool: "a", Invocation: 1}}},
+			},
+			RunCapabilities: []run.RunCapabilities{
+				{CapabilitiesPerTool: map[string]run.ToolCapabilities{"tool/a/1": expected}},
+			},
+		}
+
+		capabilities, err := ctx.GetToolCapabilities(0, "a", 1)
+
+		require.NoError(t, err)
+		require.Equal(t, expected, capabilities)
+	})
+
+	t.Run("returns empty capabilities when none were recorded", func(t *testing.T) {
+		ctx := &RunExecutionContext{
+			RunDescriptions: []*run.RunDescription{
+				{ToolsUsed: []cdf.ToolUsed{{Tool: "a", Invocation: 0}}},
+			},
+			RunCapabilities: []run.RunCapabilities{{CapabilitiesPerTool: map[string]run.ToolCapabilities{}}},
+		}
+
+		capabilities, err := ctx.GetToolCapabilities(0, "a", 0)
+
+		require.NoError(t, err)
+		require.NotNil(t, capabilities)
+		require.Empty(t, capabilities)
+	})
+
+	t.Run("allows legacy runs without tools used", func(t *testing.T) {
+		expected := run.ToolCapabilities{
+			"one": {State: "available"},
+		}
+		ctx := &RunExecutionContext{
+			RunDescriptions: []*run.RunDescription{{ToolsUsed: nil}},
+			RunCapabilities: []run.RunCapabilities{
+				{CapabilitiesPerTool: map[string]run.ToolCapabilities{"tool/legacy/0": expected}},
+			},
+		}
+
+		capabilities, err := ctx.GetToolCapabilities(0, "legacy", 0)
+
+		require.NoError(t, err)
+		require.Equal(t, expected, capabilities)
+	})
+
+	t.Run("rejects an unknown tool invocation", func(t *testing.T) {
+		ctx := &RunExecutionContext{
+			RunDescriptions: []*run.RunDescription{
+				{ToolsUsed: []cdf.ToolUsed{{Tool: "a", Invocation: 0}}},
+			},
+			RunCapabilities: []run.RunCapabilities{{CapabilitiesPerTool: map[string]run.ToolCapabilities{}}},
+		}
+
+		capabilities, err := ctx.GetToolCapabilities(0, "a", 1)
+
+		require.Nil(t, capabilities)
+		require.EqualError(t, err, `GetToolCapabilities: tool "a" invocation 1 not found for run index 0`)
+	})
+
+	t.Run("rejects an out-of-bounds run index", func(t *testing.T) {
+		ctx := &RunExecutionContext{
+			RunCapabilities: []run.RunCapabilities{{CapabilitiesPerTool: map[string]run.ToolCapabilities{}}},
+		}
+
+		capabilities, err := ctx.GetToolCapabilities(2, "a", 0)
+
+		require.Nil(t, capabilities)
+		require.EqualError(t, err, "GetToolCapabilities: run index 2 out of bounds for 1 runs")
+	})
+
+	expected := run.ToolCapabilities{
+		"one": {State: "available"},
+	}
+	migrations := []cdf.PathMigration{
+		&cdf.ToolInvocationMigration{
+			Type: "missingInvocation",
+			From: "old",
+			Ver:  semver.SemVer{Major: 1},
+		},
+		&cdf.ToolNameMigration{
+			Type: "renameTool",
+			From: "old",
+			To:   "new",
+			Ver:  semver.SemVer{Major: 2},
+		},
+	}
+	tests := []struct {
+		name     string
+		toolName string
+	}{
+		{
+			name:     "returns capabilities using migrated tool name and invocation",
+			toolName: "new",
+		},
+		{
+			name:     "returns capabilities using original tool name and invocation",
+			toolName: "old",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &RunExecutionContext{
+				RunDescriptions: []*run.RunDescription{
+					{ToolsUsed: []cdf.ToolUsed{{Tool: "old", Invocation: 0}}},
+				},
+				RunCapabilities: []run.RunCapabilities{
+					{
+						CapabilitiesPerTool: map[string]run.ToolCapabilities{"tool/old": expected},
+						Migrations:          migrations,
+					},
+				},
+			}
+
+			capabilities, err := ctx.GetToolCapabilities(0, tt.toolName, 0)
+
+			require.NoError(t, err)
+			require.Equal(t, expected, capabilities)
+		})
+	}
+}
+
 func TestRunExecutionContextCopyFileRejectsUnsupportedLocalities(t *testing.T) {
 	tests := []struct {
 		name                string
 		sourceLocality      string
 		destinationLocality string
-		wantError           string
+		wantCode            message.MessageCode
 	}{
-		{name: "host to host", sourceLocality: "host", destinationLocality: "host", wantError: `unsupported source locality "host"`},
-		{name: "target to target", sourceLocality: "target", destinationLocality: "target", wantError: `unsupported destination locality "target"`},
-		{name: "host to target", sourceLocality: "host", destinationLocality: "target", wantError: `unsupported source locality "host"`},
+		{name: "host to host", sourceLocality: "host", destinationLocality: "host", wantCode: message.EngineToolCopyFromUnsupportedSourceLocality},
+		{name: "target to target", sourceLocality: "target", destinationLocality: "target", wantCode: message.EngineToolCopyFromUnsupportedDestinationLocality},
+		{name: "host to target", sourceLocality: "host", destinationLocality: "target", wantCode: message.EngineToolCopyFromUnsupportedSourceLocality},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := &RunExecutionContext{}
 			err := ctx.copyFile(tt.sourceLocality, tt.destinationLocality, "/remote/file", "/local/file")
-			require.ErrorContains(t, err, tt.wantError)
+			var msgErr *message.MessageImpl
+			require.ErrorAs(t, err, &msgErr)
+			require.Equal(t, tt.wantCode, msgErr.Code())
+			require.Equal(t, map[string]string{
+				"sourceLocality":      tt.sourceLocality,
+				"destinationLocality": tt.destinationLocality,
+			}, msgErr.Metadata())
 		})
 	}
 }
@@ -57,7 +201,9 @@ func TestRunExecutionContextCopyFileRequiresTransferManager(t *testing.T) {
 
 	err := ctx.copyFile("target", "host", "/remote/file", "/local/file")
 
-	require.ErrorContains(t, err, "copyFrom requires APXD_ENABLE_TRANSFER_MANAGER=true")
+	var msgErr *message.MessageImpl
+	require.ErrorAs(t, err, &msgErr)
+	require.Equal(t, message.EngineToolCopyFromTransferManagerDisabled, msgErr.Code())
 }
 
 func TestCollectMonitorTargets(t *testing.T) {
@@ -194,7 +340,7 @@ func TestHostLocalityCreatesHostEngine(t *testing.T) {
 	session.On("TargetAgent", mock.Anything).Return(agentConn, nil).Once()
 	session.On("ResolveToolsDir").Return("/host/tools").Once()
 	provider := &targetsessionmocks.MockTargetSessionProvider{}
-	provider.On("TargetSession", mock.Anything).Return(session, nil).Once()
+	provider.On("HostSession").Return(session, nil).Once()
 
 	execCtx := &RunExecutionContext{
 		TargetSessions: provider,
@@ -226,6 +372,67 @@ func TestHostLocalityCreatesHostEngine(t *testing.T) {
 	provider.AssertExpectations(t)
 }
 
+func TestNewEngineLocalities(t *testing.T) {
+	t.Run("uses matching platform for each locality", func(t *testing.T) {
+		targetPlatform := &conductor.TargetPlatform{
+			Path: &conductor.LinuxPathUtils{},
+			PlatformConfiguration: conductor.PlatformConfiguration{
+				OS:           conductor.Linux,
+				Architecture: conductor.AArch64,
+			},
+		}
+		hostPlatform := &conductor.TargetPlatform{
+			Path: &conductor.LinuxPathUtils{},
+			PlatformConfiguration: conductor.PlatformConfiguration{
+				OS:           conductor.Darwin,
+				Architecture: conductor.X86_64,
+			},
+		}
+
+		targetAgentConn := agent.NewAgentConn(&mocks.TargetAgentClient{})
+		t.Cleanup(targetAgentConn.Abort)
+		hostAgentConn := agent.NewAgentConn(&mocks.TargetAgentClient{})
+		t.Cleanup(hostAgentConn.Abort)
+
+		session := &targetsessionmocks.MockTargetSession{}
+		session.On(
+			"Connect",
+			mock.Anything,
+			targetsession.ConnectOptions{PlatformGate: conductor.HostSupported},
+		).Return(nil, nil).Once()
+		session.On("TargetPlatform").Return(hostPlatform, nil).Once()
+		session.On("TargetAgent", mock.Anything).Return(hostAgentConn, nil).Once()
+		session.On("ResolveToolsDir").Return("/host/tools").Once()
+		provider := &targetsessionmocks.MockTargetSessionProvider{}
+		provider.On("HostSession").Return(session, nil).Once()
+
+		execCtx := &RunExecutionContext{
+			TargetSessions: provider,
+			AgentSupplier: func() *agent.AgentConn {
+				return targetAgentConn
+			},
+			StageNotifier: &NullStageNotifier{},
+			RecipeCtx:     &RecipeCtx{},
+			ToolPathsSupplier: func() deployer.BaseToolDeploymentPaths {
+				return deployer.BaseToolDeploymentPaths{DeployedToolsDirectory: "/target/tools"}
+			},
+			TargetPlatform: func() *conductor.TargetPlatform { return targetPlatform },
+		}
+
+		_, targetLocality, localityResolver, cleanup := execCtx.newEngineLocalities(context.Background(), false)
+		defer cleanup()
+
+		require.Equal(t, targetPlatform.PlatformConfiguration, targetLocality.Engine.GetPlatform())
+
+		hostLocality, err := localityResolver(locality.Host)
+		require.NoError(t, err)
+		require.Equal(t, hostPlatform.PlatformConfiguration, hostLocality.Engine.GetPlatform())
+
+		session.AssertExpectations(t)
+		provider.AssertExpectations(t)
+	})
+}
+
 func TestHostLocalityCreationErrors(t *testing.T) {
 	t.Run("propagates target session lookup failure", func(t *testing.T) {
 		targetPlatform := &conductor.TargetPlatform{Path: &conductor.LinuxPathUtils{}}
@@ -233,7 +440,7 @@ func TestHostLocalityCreationErrors(t *testing.T) {
 		t.Cleanup(targetAgentConn.Abort)
 		expectedErr := errors.New("target session lookup failed")
 		provider := &targetsessionmocks.MockTargetSessionProvider{}
-		provider.On("TargetSession", mock.Anything).Return(&targetsessionmocks.MockTargetSession{}, expectedErr).Once()
+		provider.On("HostSession").Return((*targetsessionmocks.MockTargetSession)(nil), expectedErr).Once()
 
 		execCtx := &RunExecutionContext{
 			TargetSessions: provider,
@@ -269,7 +476,7 @@ func TestHostLocalityCreationErrors(t *testing.T) {
 			targetsession.ConnectOptions{PlatformGate: conductor.HostSupported},
 		).Return(nil, expectedErr).Once()
 		provider := &targetsessionmocks.MockTargetSessionProvider{}
-		provider.On("TargetSession", mock.Anything).Return(session, nil).Once()
+		provider.On("HostSession").Return(session, nil).Once()
 
 		execCtx := &RunExecutionContext{
 			TargetSessions: provider,
@@ -308,7 +515,7 @@ func TestHostLocalityCreationErrors(t *testing.T) {
 		session.On("TargetPlatform").Return(targetPlatform, nil).Once()
 		session.On("TargetAgent", mock.Anything).Return(&agent.AgentConn{}, expectedErr).Once()
 		provider := &targetsessionmocks.MockTargetSessionProvider{}
-		provider.On("TargetSession", mock.Anything).Return(session, nil).Once()
+		provider.On("HostSession").Return(session, nil).Once()
 
 		execCtx := &RunExecutionContext{
 			TargetSessions: provider,
@@ -352,7 +559,7 @@ func TestContextCancelledOnHostAgentDisconnect(t *testing.T) {
 	session.On("TargetAgent", mock.Anything).Return(hostAgentConn, nil).Once()
 	session.On("ResolveToolsDir").Return("/host/tools").Once()
 	provider := &targetsessionmocks.MockTargetSessionProvider{}
-	provider.On("TargetSession", mock.Anything).Return(session, nil).Once()
+	provider.On("HostSession").Return(session, nil).Once()
 
 	execCtx := &RunExecutionContext{
 		TargetSessions: provider,
@@ -406,7 +613,7 @@ func TestHostLocalityCleanupSurvivesTargetDisconnect(t *testing.T) {
 	session.On("TargetAgent", mock.Anything).Return(hostAgentConn, nil).Once()
 	session.On("ResolveToolsDir").Return("/host/tools").Once()
 	provider := &targetsessionmocks.MockTargetSessionProvider{}
-	provider.On("TargetSession", mock.Anything).Return(session, nil).Once()
+	provider.On("HostSession").Return(session, nil).Once()
 
 	hostClient.On("StartProcess", mock.Anything, mock.MatchedBy(func(req *targetagentproto.StartProcessRequest) bool {
 		return req != nil && len(req.Command) == 1 && req.Command[0] == "host-helper"

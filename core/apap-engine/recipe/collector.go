@@ -21,10 +21,8 @@ type CollectorOutput struct {
 }
 
 type TargetInfoCollector struct {
-	TargetCollectionPath     []string
-	TargetCollectorOutput    util.Named[[]CollectorOutput]
-	TargetPIDCollectionPath  string
-	TargetPIDCollectorOutput util.Named[CollectorOutput]
+	TargetCollectionPath  []string
+	TargetCollectorOutput util.Named[[]CollectorOutput]
 }
 
 // CollectionState is a mutable struct which stores information needed for run creation
@@ -32,6 +30,7 @@ type TargetInfoCollector struct {
 type CollectionState struct {
 	RunBuilder          run.RunBuilder
 	RunManifestUpdater  *run.RunManifestUpdater
+	RunMetadataUpdater  *run.RunMetadataUpdater
 	TargetInfoCollector TargetInfoCollector
 }
 
@@ -40,7 +39,7 @@ type CollectionState struct {
 // It also builds the initial Metadata for the Run.
 // It leases the Run so that other processes know this Run is being worked on.
 // The caller must ensure the Run is released when it is no longer being worked on.
-func (r *CollectionState) CreateRun(ctx context.Context, c *run.RunCollection, rc *RecipeCtx) (run.RunID, func() error, error) {
+func (r *CollectionState) CreateRun(ctx context.Context, c *run.RunCollection, rc *RecipeCtx, notifier run.MetadataUpdateNotifier) (run.RunID, func() error, error) {
 	var err error
 
 	r.RunBuilder, err = c.RunBuilder()
@@ -70,6 +69,7 @@ func (r *CollectionState) CreateRun(ctx context.Context, c *run.RunCollection, r
 		_ = release()
 		return run.InvalidRunID, nil, fmt.Errorf("failed to create new run, %w", err)
 	}
+	r.RunMetadataUpdater = run.NewRunMetadataUpdater(newRunID, c, notifier)
 
 	err = run.WriteRunCategorization(categorizationPath, nil)
 	if err != nil {
@@ -99,10 +99,6 @@ func (r *CollectionState) ConfigureCollectorRunBuilder(c *run.RunCollection) err
 		targetCollection := r.RunBuilder.AddComponent(r.TargetInfoCollector.TargetCollectorOutput.Value[i].ComponentType, collectorRelativePath)
 		r.TargetInfoCollector.TargetCollectionPath = append(r.TargetInfoCollector.TargetCollectionPath, targetCollection)
 	}
-
-	collectorRelativePath := filepath.Join("collector", r.TargetInfoCollector.TargetPIDCollectorOutput.Name, r.TargetInfoCollector.TargetPIDCollectorOutput.Value.Filename)
-	targetCollection := r.RunBuilder.AddComponent(r.TargetInfoCollector.TargetPIDCollectorOutput.Value.ComponentType, collectorRelativePath)
-	r.TargetInfoCollector.TargetPIDCollectionPath = targetCollection
 
 	return nil
 }

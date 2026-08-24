@@ -44,6 +44,7 @@ type GrpcServerConfig struct {
 	LogPath                   string
 	SrcToolsDirectory         string
 	DeploymentToolsDir        string
+	ADBPath                   string
 	IsRootWorkerEnabled       bool
 	EnableFullCaptureSupport  bool
 	EnableRerendering         bool
@@ -112,11 +113,6 @@ func (s *GrpcServer) runServer() error {
 	log.WithField("version", versions.GetVersion()).Infof("Launching %v daemon", terminology.GetProductFullName())
 	log.Infof("gRPC server configuration: %+v", s.Config)
 
-	if err := s.makePidFile(); err != nil {
-		return err
-	}
-	defer s.deletePidFile()
-
 	if s.Config.AuthPort <= 0 {
 		return fmt.Errorf("auth port must be configured")
 	}
@@ -172,6 +168,7 @@ func (s *GrpcServer) runServer() error {
 		LogFile:                   s.Config.LogPath,
 		SourceToolsDir:            s.Config.SrcToolsDirectory,
 		ConfigDirectory:           s.Config.ConfigDirectory,
+		ADBPath:                   s.Config.ADBPath,
 	}
 
 	deploymentPaths := deployer.BaseToolDeploymentPaths{
@@ -250,6 +247,12 @@ func (s *GrpcServer) runServer() error {
 		listenErr := fmt.Errorf("main server failed to listen: %w", err)
 		return message.New(message.EngineLifecycleStartupFailed).WithCause(listenErr)
 	}
+	closeMainListener := true
+	defer func() {
+		if closeMainListener {
+			_ = lis.Close()
+		}
+	}()
 	log.WithFields(log.Fields{"address": lis.Addr()}).Info("Main server is listening with configuration")
 
 	listenTLS := s.ListenTLS
@@ -261,12 +264,25 @@ func (s *GrpcServer) runServer() error {
 		listenErr := fmt.Errorf("auth server failed to listen: %w", err)
 		return message.New(message.EngineLifecycleStartupFailed).WithCause(listenErr)
 	}
+	closeAuthListener := true
+	defer func() {
+		if closeAuthListener {
+			_ = authLis.Close()
+		}
+	}()
 	log.WithFields(log.Fields{"address": authLis.Addr()}).Info("Auth server is listening with configuration")
 
+	if err := s.makePidFile(); err != nil {
+		return err
+	}
+	defer s.deletePidFile()
+
 	serve(ctx, grpcServer, lis, cancel)
+	closeMainListener = false
 	defer grpcServer.GracefulStop()
 
 	serve(ctx, authServer, authLis, cancel)
+	closeAuthListener = false
 	defer authServer.GracefulStop()
 
 	<-ctx.Done()

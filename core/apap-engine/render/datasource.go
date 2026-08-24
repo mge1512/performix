@@ -220,6 +220,14 @@ type DecodedDataSourceConfig struct {
 	} `json:"data_source"`
 }
 
+// DecodedDependenciesConfig is a struct used to decode dependency configuration from the renderer config JSON.
+type DecodedDependenciesConfig struct {
+	DataSources struct {
+		Tables    DataSourcesMap       `json:"tables"`
+		Renderers []RendererDependency `json:"renderers"`
+	} `json:"data_source"`
+}
+
 // ParseDataSourcesFromConfig parses the data sources from a JSON configuration string, returning a map of data sources.
 func ParseDataSourcesFromConfig(configJSON string) (map[string][]DataSource, error) {
 	if len(configJSON) == 0 {
@@ -231,4 +239,20 @@ func ParseDataSourcesFromConfig(configJSON string) (map[string][]DataSource, err
 	}
 
 	return result.DataSources.Tables, nil
+}
+
+// ParseDependenciesFromConfig parses table and renderer dependencies from a JSON configuration string.
+func ParseDependenciesFromConfig(configJSON string) (Dependencies, error) {
+	if len(configJSON) == 0 {
+		return Dependencies{}, nil
+	}
+	result, err := util.DecodeJSONWithHook[DecodedDependenciesConfig]([]byte(configJSON), DataSourceDecodeHook)
+	if err != nil {
+		return Dependencies{}, fmt.Errorf("failed to parse dependencies from config: %w", err)
+	}
+
+	return Dependencies{
+		Tables:    result.DataSources.Tables,
+		Renderers: result.DataSources.Renderers,
+	}, nil
 }

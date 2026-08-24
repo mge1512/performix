@@ -3,22 +3,70 @@
 
 const NO_OP_WORKLOAD_STATE = {
   completed: () => false,
+  completedAtMonotonicMs: () => null,
   update: () => {},
   assertHealthy: () => {},
   handle: null,
+  exitPromise: null,
 };
 
 const MAX_UNTERMINATED_BYTES = 1024 * 1024;
 const WORKLOAD_LOG_FILENAME = 'workload.log.json';
+const unsupportedWorkloadCode =
+  'tool_integrations.common.UNSUPPORTED_WORKLOAD_TYPE';
+const invalidLaunchWorkloadCode =
+  'tool_integrations.common.INVALID_LAUNCH_WORKLOAD';
+const invalidAttachWorkloadCode =
+  'tool_integrations.common.INVALID_ATTACH_WORKLOAD';
+
+/**
+ * Validates launch, attach, or system-wide workloads.
+ *
+ * @param {import("../recipes/docs/jsdocs").Workload} workload
+ */
+function validateWorkload(workload) {
+  if (workload.type === 'launch') {
+    if (!Array.isArray(workload.command) || workload.command.length === 0) {
+      throw { code: invalidLaunchWorkloadCode, metadata: {} };
+    }
+    return;
+  }
+  if (workload.type === 'attach') {
+    if (!Number.isInteger(workload.pid) || workload.pid <= 0) {
+      throw {
+        code: invalidAttachWorkloadCode,
+        metadata: { pid: String(workload.pid) },
+      };
+    }
+    return;
+  }
+  if (workload.type === 'systemWide') {
+    return;
+  }
+  throw {
+    code: unsupportedWorkloadCode,
+    metadata: { workloadType: workload.type },
+  };
+}
 
 /**
  * Launch a workload if provided, returning an object that can be polled via completed().
  * @param {import("../recipes/docs/jsdocs").Engine} engine
  * @param {Workload} workload
  * @param {string} outputDirectory
- * @returns {Promise<{completed: () => boolean, update: () => void, assertHealthy: () => void, handle: import("../recipes/docs/jsdocs").ProcessHandle | null}>}
+ * @param {{
+ *   command?: string[],
+ *   processOptions?: import("../recipes/docs/jsdocs").ProcessOptions,
+ *   captureLogs?: boolean,
+ * }} [options]
+ * @returns {Promise<{completed: () => boolean, completedAtMonotonicMs: () => number | null, update: () => void, assertHealthy: () => void, handle: import("../recipes/docs/jsdocs").ProcessHandle | null, exitPromise: Promise<{exitCode: number}> | null}>}
  */
-async function launchWorkloadIfNeeded(engine, workload, outputDirectory) {
+async function launchWorkloadIfNeeded(
+  engine,
+  workload,
+  outputDirectory,
+  options = {},
+) {
   const workloadInfo = normalizeWorkloadDescriptor(workload);
   if (workloadInfo.type === 'none') {
     return NO_OP_WORKLOAD_STATE;
@@ -35,45 +83,53 @@ async function launchWorkloadIfNeeded(engine, workload, outputDirectory) {
   }
 
   let finished = false;
+  let completionMonotonicTimestampMs = null;
   let workloadFailure;
-  const command = workloadInfo.command;
   const stringCommand = workloadInfo.rawCommand;
+  const command = options.command ?? ['sh', '-c', stringCommand];
+  const processOptions = {
+    stdout: { redirect: 'stream' },
+    stderr: { redirect: 'stream' },
+    environment: workloadInfo.environment,
+    workingDirectory: workloadInfo.workingDir,
+    ...(options.processOptions || {}),
+  };
+  const captureLogs = options.captureLogs !== false;
   const logPath = joinOutputPath(outputDirectory, WORKLOAD_LOG_FILENAME);
 
   engine.log('info', `Launching workload command: ${stringCommand}`);
   let handle;
   let logHandle;
-  try {
-    logHandle = await engine.createRunFile(logPath, {
-      name: 'log-json',
-      version: '0.2',
-    });
-  } catch (err) {
-    engine.log(
-      'error',
-      `Failed to create workload log file '${logPath}': ${err?.message ?? err}`,
-    );
-    throw {
-      code: 'tool_integrations.common.WORKLOAD_LOG_FILE_CREATE_FAILED',
-      metadata: {
-        workload: stringCommand,
-        reason: err?.message ?? 'log_file_create_failed',
-      },
-    };
+  if (captureLogs) {
+    try {
+      logHandle = await engine.createRunFile(logPath, {
+        name: 'log-json',
+        version: '0.2',
+      });
+    } catch (err) {
+      engine.log(
+        'error',
+        `Failed to create workload log file '${logPath}': ${err?.message ?? err}`,
+      );
+      throw {
+        code: 'tool_integrations.common.WORKLOAD_LOG_FILE_CREATE_FAILED',
+        metadata: {
+          workload: stringCommand,
+          reason: err?.message ?? 'log_file_create_failed',
+        },
+      };
+    }
   }
   try {
-    handle = await engine.startProcess(['sh', '-c', stringCommand], {
-      stdout: { redirect: 'stream' },
-      stderr: { redirect: 'stream' },
-      environment: workloadInfo.environment,
-      workingDirectory: workloadInfo.workingDir,
-    });
+    handle = await engine.startProcess(command, processOptions);
   } catch (err) {
     engine.log(
       'error',
       `Failed to start workload ${stringCommand}: ${err?.message ?? err}`,
     );
-    await logHandle.close();
+    if (logHandle) {
+      await logHandle.close();
+    }
     throw {
       code: 'tool_integrations.common.WORKLOAD_START_FAILED',
       metadata: {
@@ -84,17 +140,20 @@ async function launchWorkloadIfNeeded(engine, workload, outputDirectory) {
   }
 
   engine.log('info', `Workload '${stringCommand}' started successfully`);
-  void captureWorkloadLogs(engine, logHandle, handle, stringCommand).catch(
-    (err) => {
-      engine.log(
-        'warn',
-        `Failed to capture workload logs for '${stringCommand}': ${err?.message ?? err}`,
-      );
-    },
-  );
-  void handle
-    .wait()
+  if (logHandle) {
+    void captureWorkloadLogs(engine, logHandle, handle, stringCommand).catch(
+      (err) => {
+        engine.log(
+          'warn',
+          `Failed to capture workload logs for '${stringCommand}': ${err?.message ?? err}`,
+        );
+      },
+    );
+  }
+  const exitPromise = handle.wait();
+  void exitPromise
     .then((result) => {
+      completionMonotonicTimestampMs = engine.monotonicNow();
       finished = true;
       if (result.exitCode === 0) {
         engine.log(
@@ -117,6 +176,7 @@ async function launchWorkloadIfNeeded(engine, workload, outputDirectory) {
       }
     })
     .catch((err) => {
+      completionMonotonicTimestampMs = engine.monotonicNow();
       finished = true;
       engine.log(
         'error',
@@ -133,6 +193,7 @@ async function launchWorkloadIfNeeded(engine, workload, outputDirectory) {
 
   return {
     completed: () => finished,
+    completedAtMonotonicMs: () => completionMonotonicTimestampMs,
     update: () => {},
     assertHealthy: () => {
       if (workloadFailure) {
@@ -140,6 +201,7 @@ async function launchWorkloadIfNeeded(engine, workload, outputDirectory) {
       }
     },
     handle: handle,
+    exitPromise,
   };
 }
 
@@ -212,7 +274,7 @@ async function captureWorkloadLogs(engine, logHandle, processHandle, command) {
     await logHandle.close();
     engine.log(
       'debug',
-      `Workload log capture complete for '${command}' -> ${logHandle.path}`,
+      `Workload log capture complete for '${command}' -> ${logHandle.path()}`,
     );
   }
 }
@@ -269,4 +331,5 @@ function getExecutableFromWorkload(wl) {
 module.exports = {
   launchWorkloadIfNeeded,
   getExecutableFromWorkload,
+  validateWorkload,
 };

@@ -42,8 +42,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import truststore
 
+# The internal API proxy can use enterprise certificate authorities which are
+# available through the operating-system trust store but not Python's CA bundle.
+truststore.inject_into_ssl()
+
+from codex_session_metrics import (
+    codex_session_log,
+    collect_mcp_tool_metrics,
+    iter_jsonl,
+)
 from performance_quality import PERFORMIX_MCP_MODE
+from recipe_support import mode_supports_recipe, requires_source_archive, resolve_prerecord_config, resolve_recipe
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from run_export_helper import sha256_file
@@ -58,6 +69,8 @@ RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 FAILURE_RESPONSE_MAX_CHARS = 4000
 FAILURE_RESPONSE_MAX_LINES = 80
 FAILURE_TEXT_FALLBACK_WIDTH = 80
+MCP_RUN_ID_PLACEHOLDER = "{run_id}"
+DEFAULT_MCP_PROMPT = f"Show me AI Insights for Performix run {MCP_RUN_ID_PLACEHOLDER}. Use Markdown."
 LOGGER = logging.getLogger(__name__)
 CODEX_TRUNCATION_MARKER_RE = re.compile(
     rf"\N{{HORIZONTAL ELLIPSIS}}(\d+) tokens truncated\N{{HORIZONTAL ELLIPSIS}}"
@@ -159,7 +172,14 @@ def iter_manifest_parameters(pytestconfig, manifest: dict[str, Any]) -> list[dic
     for test_case in manifest.get("tests", []):
         if acts and not acts.intersection(test_case.get("acts", [])):
             continue
+        test_case = {
+            **test_case,
+            "recipe": resolve_recipe(test_case, defaults),
+            "prerecord": resolve_prerecord_config(test_case, defaults),
+        }
         for mode in modes:
+            if not mode_supports_recipe(mode, test_case["recipe"]):
+                continue
             params.append({"test_case": test_case, "mode": mode})
     return params
 
@@ -215,10 +235,26 @@ def should_xfail_final_label(final_label: str, *, expected_failure: bool) -> boo
 
 
 def should_fail_on_tool_output_truncation(mode: str, invoke_meta: dict[str, Any]) -> bool:
-    """Return whether Codex tool-output truncation should fail this attempt."""
-    return (
-        tool_output_truncation_markers(invoke_meta) > 0
-        and mode not in NON_FATAL_TOOL_OUTPUT_TRUNCATION_MODES
+    """Return whether a curated AI Insights tool call was truncated."""
+    marker_count = tool_output_truncation_markers(invoke_meta)
+    if marker_count <= 0:
+        return False
+    if mode in NON_FATAL_TOOL_OUTPUT_TRUNCATION_MODES:
+        return False
+
+    details = invoke_meta.get("truncation_details")
+    if not isinstance(details, list) or len(details) != marker_count:
+        return True
+    mode_config = MCP_MODES.get(mode)
+    if mode_config is None:
+        return True
+    expected_namespace = codex_mcp_namespace(mode_config.server)
+    curated_tools = {mode_config.tool, *mode_config.extra_tools}
+    return any(
+        isinstance(detail, dict)
+        and detail.get("namespace") == expected_namespace
+        and detail.get("tool") in curated_tools
+        for detail in details
     )
 
 
@@ -242,6 +278,16 @@ def slugify_test_name(value: str) -> str:
     """Return a pytest-id-safe description fragment."""
     slug = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
     return slug or "unspecified"
+
+
+def resolve_mcp_prompt(test_case: dict[str, Any], run_id: str) -> str:
+    """Resolve the testcase's MCP prompt for an imported Performix run."""
+    prompt = test_case.get("mcp_prompt", DEFAULT_MCP_PROMPT)
+    test_id = test_case.get("id", "<unknown>")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError(f"testcase {test_id} mcp_prompt must be a non-empty string")
+    resolved = prompt.replace(MCP_RUN_ID_PLACEHOLDER, run_id)
+    return resolved if resolved.endswith("\n") else f"{resolved}\n"
 
 
 def pytest_parameter_id(test_case: dict[str, Any], mode: str, attempt: int) -> str:
@@ -395,20 +441,27 @@ def import_run_cached(pytestconfig, test_case: dict[str, Any], cfg: dict[str, An
         raise FileNotFoundError(
             f"missing pre-recorded run archive for {test_case['id']}: {archive}"
         )
-    source_archive = archive.parent / "test_src.zip"
-    if not source_archive.is_file():
-        raise FileNotFoundError(
-            f"missing pre-recorded source archive for {test_case['id']}: {source_archive}"
-        )
     LOGGER.info("Using pre-recorded run archive for %s: %s", test_case["id"], archive)
     archive_sha = sha256_file(archive)
-    source_archive_sha = sha256_file(source_archive)
-    source_root = extract_source_archive(
-        source_archive,
-        source_archive_sha,
-        cfg,
-        test_case["id"],
-    )
+    source_archive_sha = ""
+    source_archive_path = ""
+    source_root = ""
+    if requires_source_archive(test_case["recipe"], test_case.get("recipe_params")):
+        source_archive = archive.parent / "test_src.zip"
+        if not source_archive.is_file():
+            raise FileNotFoundError(
+                f"missing pre-recorded source archive for {test_case['id']}: {source_archive}"
+            )
+        source_archive_sha = sha256_file(source_archive)
+        source_archive_path = str(source_archive)
+        source_root = str(
+            extract_source_archive(
+                source_archive,
+                source_archive_sha,
+                cfg,
+                test_case["id"],
+            )
+        )
     cache_key = f"ai_insights/imports/{test_case['id']}/{archive_sha}"
     cached = pytestconfig.cache.get(cache_key, None)
     if not isinstance(cached, dict) or not isinstance(cached.get("run_id"), str):
@@ -421,14 +474,20 @@ def import_run_cached(pytestconfig, test_case: dict[str, Any], cfg: dict[str, An
             f"pre-recorded run import prepared during setup is not available for {test_case['id']}: {run_id}"
         )
     LOGGER.info("Using setup-imported run for %s: %s", test_case["id"], run_id)
-    return {
+    run_meta = {
         "run_id": run_id,
         "archive_sha256": archive_sha,
         "archive_path": str(archive),
-        "source_archive_sha256": source_archive_sha,
-        "source_archive_path": str(source_archive),
-        "source_root": str(source_root),
     }
+    if source_root:
+        run_meta.update(
+            {
+                "source_archive_sha256": source_archive_sha,
+                "source_archive_path": source_archive_path,
+                "source_root": source_root,
+            }
+        )
+    return run_meta
 
 
 def toml_string(value: str) -> str:
@@ -499,10 +558,18 @@ disable_response_storage = true
 # Keep Codex confined to the prompt workspace and the configured MCP server.
 default_permissions = "ai-insights-mcp"
 
+# Treat the generated workspace as the project root instead of loading project
+# instructions from parent directories in the Performix checkout.
+project_root_markers = []
+
 [features]
 # The model under test should obtain Performix evidence through MCP, not by
 # running local shell commands during evaluation.
 shell_tool = false
+
+# Marketplace plugins are not part of the evaluation and would otherwise be
+# downloaded into every attempt's isolated CODEX_HOME.
+plugins = false
 
 [model_providers.proxy]
 name = "OpenAI"
@@ -536,21 +603,6 @@ default_tools_approval_mode = "approve"
     return codex_home
 
 
-def iter_jsonl(path: Path):
-    """Yield JSON objects from a completed Codex JSONL transcript."""
-    if not path.is_file():
-        return
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{path} line {line_number} is not valid JSON") from exc
-        if isinstance(value, dict):
-            yield value
-
-
 def collect_json_value(value: Any, keys: set[str]) -> list[Any]:
     matches: list[Any] = []
     if isinstance(value, dict):
@@ -571,16 +623,34 @@ def collect_token_usage(raw_jsonl: Path) -> list[Any]:
     return usage
 
 
+def mcp_tool_failure_message(item: dict[str, Any]) -> str:
+    """Return the most useful error message recorded for a failed MCP call."""
+    error = item.get("error") or {}
+    if message := error.get("message"):
+        return str(message)
+
+    result = item.get("result") or {}
+    structured_error = (result.get("structured_content") or {}).get("error") or {}
+    if message := structured_error.get("message"):
+        return str(message)
+
+    return "unknown MCP tool failure"
+
+
 def validate_mcp_call(raw_jsonl: Path, mode: McpServer) -> dict[str, Any]:
-    """Confirm MCP client used the expected AI Insights MCP tool successfully.
+    """Confirm the client used the expected AI Insights MCP tool.
 
     A non-empty Markdown answer is not enough for this suite: the answer
     must come from the intended MCP path so the test exercises the AI
-    Insights integration rather than a generic model response.
+    Insights integration rather than a generic model response. Individual
+    MCP tool failures are retained for reporting, but do not invalidate a
+    response which the model produced after obtaining the required AI
+    Insights guidance.
     """
     LOGGER.info("Validating %s MCP tool call in Codex event log", mode.id)
     failed_messages: list[str] = []
     completed_by_tool: dict[str, int] = {}
+    failed_by_tool: dict[str, int] = {}
     for event in iter_jsonl(raw_jsonl):
         if event.get("type") != "item.completed":
             continue
@@ -593,10 +663,28 @@ def validate_mcp_call(raw_jsonl: Path, mode: McpServer) -> dict[str, Any]:
         if item.get("status") == "completed":
             completed_by_tool[tool] = completed_by_tool.get(tool, 0) + 1
         elif item.get("status") == "failed":
-            error = item.get("error") or {}
-            failed_messages.append(f"{tool}: {error.get('message') or 'unknown MCP tool failure'}")
+            failed_by_tool[tool] = failed_by_tool.get(tool, 0) + 1
+            failed_messages.append(f"{tool}: {mcp_tool_failure_message(item)}")
+    observed_tools = completed_by_tool.keys() | failed_by_tool.keys()
+    failure_rate_percent_by_tool = {
+        tool: failed_by_tool.get(tool, 0)
+        * 100.0
+        / (failed_by_tool.get(tool, 0) + completed_by_tool.get(tool, 0))
+        for tool in sorted(observed_tools)
+    }
     if failed_messages:
-        raise RuntimeError(f"{mode.server} MCP tool call failed: {'; '.join(failed_messages)}")
+        failure_rates = "; ".join(
+            f"{tool}: {failed_by_tool[tool]}/"
+            f"{failed_by_tool[tool] + completed_by_tool.get(tool, 0)} failed "
+            f"({failure_rate_percent_by_tool[tool]:.1f}%)"
+            for tool in sorted(failed_by_tool)
+        )
+        LOGGER.warning(
+            "%s MCP tool call failure rate(s): %s. Failure details: %s",
+            mode.server,
+            failure_rates,
+            "; ".join(failed_messages),
+        )
     required_completed = completed_by_tool.get(mode.tool, 0)
     if required_completed == 0:
         raw_text = raw_jsonl.read_text(encoding="utf-8") if raw_jsonl.is_file() else ""
@@ -616,6 +704,10 @@ def validate_mcp_call(raw_jsonl: Path, mode: McpServer) -> dict[str, Any]:
         "completed_calls": sum(completed_by_tool.values()),
         "required_completed_calls": required_completed,
         "completed_by_tool": completed_by_tool,
+        "failed_calls": len(failed_messages),
+        "failed_by_tool": failed_by_tool,
+        "failure_rate_percent_by_tool": failure_rate_percent_by_tool,
+        "failed_messages": failed_messages,
     }
 
 
@@ -626,31 +718,55 @@ def command_output_is_denied_only(output: str) -> bool:
     return "Process exited with code 0" not in output
 
 
-def codex_session_log(codex_home: Path) -> Path:
-    """Return the single Codex session transcript for an attempt."""
-    sessions = codex_home / "sessions"
-    session_logs = sorted(sessions.rglob("*.jsonl")) if sessions.is_dir() else []
-    if len(session_logs) != 1:
-        raise RuntimeError(
-            f"expected exactly one Codex session log under {sessions}, found {len(session_logs)}"
-        )
-    return session_logs[0]
+def codex_mcp_namespace(server: str) -> str:
+    """Return the model-visible Codex namespace for an MCP server."""
+    return f"mcp__{re.sub(r'[^A-Za-z0-9_]', '_', server)}"
 
 
-def codex_truncation_marker_token_counts(codex_home: Path) -> list[int]:
-    """Return per-marker token counts from Codex tool-output truncation markers.
+def codex_truncation_markers(codex_home: Path, server: str) -> list[dict[str, Any]]:
+    """Return tool identities and token counts for truncated Codex outputs.
 
-    Codex writes the full MCP result to the exec JSONL event log, but the
-    per-attempt session transcript records the tool output as it was sent to
-    the model. The transcript is therefore where the Codex truncation marker(s)
-    appear when `tool_output_token_limit` is exceeded.
+    `codex_exec.jsonl` records the MCP server, tool, completion status and full
+    result. The session transcript records the namespace, tool name, call ID
+    and output sent to the model, so it contains any Codex truncation marker.
+    Neither file contains all the data needed to validate the call and inspect
+    the model-visible output. MCP call validation therefore uses the exec log;
+    extract each marker and its tool identity here from the session transcript.
+    The expected server is used to reject malformed Performix calls whose tool
+    name cannot be read; other truncated tools are retained for warning output.
     """
     LOGGER.debug("Checking Codex session transcript for truncated tool output")
     session_log = codex_session_log(codex_home)
-    return [
-        int(match.group(1))
-        for match in CODEX_TRUNCATION_MARKER_RE.finditer(session_log.read_text(encoding="utf-8"))
-    ]
+    expected_namespace = codex_mcp_namespace(server)
+    calls: dict[str, dict[str, str]] = {}
+    markers: list[dict[str, Any]] = []
+    for event in iter_jsonl(session_log):
+        payload = event.get("payload") or {}
+        call_id = str(payload.get("call_id") or "")
+        if payload.get("type") == "function_call":
+            namespace = payload.get("namespace")
+            tool = payload.get("name")
+            if namespace == expected_namespace and (not isinstance(tool, str) or not tool):
+                raise RuntimeError(
+                    f"Codex session transcript recorded a {server} MCP call without a tool name"
+                )
+            if call_id:
+                calls[call_id] = {
+                    "namespace": namespace if isinstance(namespace, str) and namespace else "unknown",
+                    "tool": tool if isinstance(tool, str) and tool else "unknown",
+                }
+            continue
+        if payload.get("type") != "function_call_output":
+            continue
+        for match in CODEX_TRUNCATION_MARKER_RE.finditer(str(payload.get("output") or "")):
+            call = calls.get(call_id, {"namespace": "unknown", "tool": "unknown"})
+            markers.append(
+                {
+                    **call,
+                    "token_count": int(match.group(1)),
+                }
+            )
+    return markers
 
 
 def successful_external_commands(codex_home: Path) -> list[str]:
@@ -689,6 +805,7 @@ def successful_external_commands(codex_home: Path) -> list[str]:
 def invoke_mcp_mode(
     attempt_dir: Path,
     run_meta: dict[str, Any],
+    test_case: dict[str, Any],
     cfg: dict[str, Any],
     mode: McpServer,
 ) -> dict[str, Any]:
@@ -707,7 +824,7 @@ def invoke_mcp_mode(
     workspace.mkdir(parents=True)
     codex_home = write_codex_home(attempt_dir, workspace, cfg, mode)
 
-    prompt = f"Show me AI Insights for Performix run {run_meta['run_id']}. Use Markdown.\n"
+    prompt = resolve_mcp_prompt(test_case, run_meta["run_id"])
     prompt_path = attempt_dir / "codex_prompt.txt"
     raw_jsonl = attempt_dir / "codex_exec.jsonl"
     last_message = attempt_dir / "codex_last_message.txt"
@@ -753,8 +870,10 @@ def invoke_mcp_mode(
     LOGGER.info("Captured Codex response: %s (%d bytes)", response_md, response_md.stat().st_size)
 
     mcp = validate_mcp_call(raw_jsonl, mode)
-    truncation_token_counts = codex_truncation_marker_token_counts(codex_home)
-    truncation_markers = len(truncation_token_counts)
+    mcp.update(collect_mcp_tool_metrics(codex_home, mode.server))
+    truncation_details = codex_truncation_markers(codex_home, mode.server)
+    truncation_token_counts = [detail["token_count"] for detail in truncation_details]
+    truncation_markers = len(truncation_details)
     successful_commands = successful_external_commands(codex_home)
     if successful_commands:
         raise RuntimeError(f"Codex successfully used external shell commands: {successful_commands}")
@@ -768,6 +887,7 @@ def invoke_mcp_mode(
         "token_usage": collect_token_usage(raw_jsonl),
         "truncation_markers": truncation_markers,
         "truncation_marker_token_counts": truncation_token_counts,
+        "truncation_details": truncation_details,
         "successful_external_commands": successful_commands,
         "codex_home": str(codex_home),
         "workspace": str(workspace),
@@ -780,12 +900,13 @@ def invoke_mcp_mode(
 
 
 def score_truncated_attempt(attempt_dir: Path, test_case: dict[str, Any], invoke_meta: dict[str, Any]) -> dict[str, Any]:
-    """Record an evaluation failure caused by Codex tool-output truncation."""
+    """Record an evaluation failure caused by required tool-output truncation."""
     token_counts = invoke_meta.get("truncation_marker_token_counts", [])
     markers = invoke_meta.get("truncation_markers", len(token_counts))
+    details = invoke_meta.get("truncation_details", [])
     detail = (
-        "Codex truncated MCP tool output in the session transcript: "
-        f"found {markers} marker(s) with truncated token counts {token_counts}."
+        "Codex truncated the required AI Insights MCP tool output in the session transcript: "
+        f"found {markers} marker(s) with details {details}."
     )
     judge = {
         "label": "fail",
@@ -1025,10 +1146,31 @@ def record_evaluation_properties(
         for result in attempt_results
         if isinstance(result["invoke"].get("duration_seconds"), (int, float))
     )
-    mcp_calls = sum(
-        result["invoke"].get("mcp", {}).get("completed_calls", 0)
+    mcp_tool_calls_succeeded = sum(
+        result["invoke"].get("mcp", {}).get("tool_calls_succeeded", 0)
         for result in attempt_results
         if isinstance(result["invoke"].get("mcp"), dict)
+    )
+    mcp_tool_calls_failed = sum(
+        result["invoke"].get("mcp", {}).get("tool_calls_failed", 0)
+        for result in attempt_results
+        if isinstance(result["invoke"].get("mcp"), dict)
+    )
+    mcp_tool_duration_seconds_succeeded = sum(
+        result["invoke"].get("mcp", {}).get("tool_duration_seconds_succeeded", 0)
+        for result in attempt_results
+        if isinstance(
+            result["invoke"].get("mcp", {}).get("tool_duration_seconds_succeeded"),
+            (int, float),
+        )
+    )
+    mcp_tool_duration_seconds_failed = sum(
+        result["invoke"].get("mcp", {}).get("tool_duration_seconds_failed", 0)
+        for result in attempt_results
+        if isinstance(
+            result["invoke"].get("mcp", {}).get("tool_duration_seconds_failed"),
+            (int, float),
+        )
     )
     truncation_markers = sum(
         result["invoke"].get("truncation_markers", 0)
@@ -1048,7 +1190,16 @@ def record_evaluation_properties(
         ]
     )
     record_property("ai_agent_duration_seconds", round(agent_duration, 3))
-    record_property("ai_mcp_completed_calls", mcp_calls)
+    record_property("ai_mcp_tool_calls_succeeded", mcp_tool_calls_succeeded)
+    record_property("ai_mcp_tool_calls_failed", mcp_tool_calls_failed)
+    record_property(
+        "ai_mcp_tool_duration_seconds_succeeded",
+        round(mcp_tool_duration_seconds_succeeded, 3),
+    )
+    record_property(
+        "ai_mcp_tool_duration_seconds_failed",
+        round(mcp_tool_duration_seconds_failed, 3),
+    )
     record_property("ai_tool_output_truncated", truncation_markers > 0)
     record_property("ai_tool_output_truncation_markers", truncation_markers)
     record_property("ai_tool_output_truncated_tokens", sum_tool_output_truncated_tokens(attempt_results))
@@ -1229,7 +1380,7 @@ def run_attempt(pytestconfig, test_case: dict[str, Any], mode: str, cfg: dict[st
         if mode == REST_MODE:
             invoke_meta = invoke_rest_mode(attempt_dir, full_run_meta, cfg)
         else:
-            invoke_meta = invoke_mcp_mode(attempt_dir, full_run_meta, cfg, MCP_MODES[mode])
+            invoke_meta = invoke_mcp_mode(attempt_dir, full_run_meta, test_case, cfg, MCP_MODES[mode])
         if should_fail_on_tool_output_truncation(mode, invoke_meta):
             score = score_truncated_attempt(attempt_dir, test_case, invoke_meta)
         else:

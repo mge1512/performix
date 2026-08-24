@@ -956,6 +956,20 @@ func TestDescToProtoIncludesAndroidLaunchMetadata(t *testing.T) {
 	}, desc.Metadata.AndroidLaunchWorkload)
 }
 
+func TestDescToProtoPreservesRunSizePresence(t *testing.T) {
+	sizeBytes := uint64(1536)
+	desc, err := DescToProto(&run.RunDescription{SizeBytes: &sizeBytes})
+	require.NoError(t, err)
+	require.NotNil(t, desc.Metadata)
+	require.NotNil(t, desc.Metadata.SizeBytes)
+	assert.Equal(t, sizeBytes, desc.Metadata.GetSizeBytes())
+
+	desc, err = DescToProto(&run.RunDescription{})
+	require.NoError(t, err)
+	require.NotNil(t, desc.Metadata)
+	assert.Nil(t, desc.Metadata.SizeBytes)
+}
+
 func TestRecipeCtxFromProto(t *testing.T) {
 	t.Run("returns error if context is empty", func(t *testing.T) {
 		_, err := RecipeCtxFromProto(&apapproto.RecipeStartCommand{})

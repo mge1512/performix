@@ -4,10 +4,23 @@
 // Code Hotspots Recipe Definition
 
 // @ts-check
+const {
+  findTimelineCounterBindings,
+  buildTimelineSQLRendererBundle,
+} = require('./lib/timeline_sql_renderer');
+
 const TOOL_NEOPROF = { name: 'neoprof', version: '1.1.0' };
 const TOOL_WPERF = { name: 'wperf', version: '1.0.1' };
+const NEOPROF_TIMELINE_COUNTER_PARQUET_PATTERN =
+  'tool/neoprof/0/output/parquet/timeline/key_type=*/series_id=*/bin_duration=*/counter.parquet';
+const COUNTER_CAPABILITY_COMPONENT_TYPE = {
+  name: 'tool_capabilities/counter',
+  version: '1.0',
+};
 const readinessMessageCode =
   'engine.recipeparser.js_recipe_stage.READINESS_MESSAGE';
+const telemetrySpecificationUnavailableMessageCode =
+  'recipes.code_hotspots.TELEMETRY_SPECIFICATION_UNAVAILABLE';
 const { collectToolAdvice, toolStatusToRecipeStatus } = recipeUtils;
 
 /**
@@ -94,6 +107,16 @@ var recipe = {
       label: 'Reformat on host',
       description:
         'Run analysis on the host instead of the target. This is always enabled for Android targets but can be optionally enabled for Linux targets. collect_java_stacks and collect_dotnet_stacks are not currently supported when reformat_on_host is enabled.',
+      config: {
+        type: 'checkbox',
+        defaultValue: false,
+      },
+    },
+    {
+      id: 'rich_data_capture',
+      required: false,
+      label: 'Collect rich data',
+      description: `Enables the collection of rich data from the target, which enables advanced filtering functionality after the run completes. This can significantly increase host storage usage and transfer time.`,
       config: {
         type: 'checkbox',
         defaultValue: false,
@@ -214,15 +237,24 @@ function generateWperfConfig(workload, params) {
  * @returns {Object.<string, any>}
  */
 function buildNeoprofParams(context, samplingFreq) {
-  return {
+  const androidTarget = isAndroidTarget(context.targetInfo());
+  const params = {
     mode: 'samples',
     sampling_frequency: samplingFreq,
-    collect_java_stacks: context.getParameter('collect_java_stacks'),
-    collect_dotnet_stacks: context.getParameter('collect_dotnet_stacks'),
-    reformat_on_host:
-      isAndroidTarget(context.targetInfo()) ||
-      context.getParameter('reformat_on_host'),
+    rich_data_capture: androidTarget
+      ? false
+      : context.getParameter('rich_data_capture'),
+    reformat_on_host: androidTarget || context.getParameter('reformat_on_host'),
   };
+
+  if (!androidTarget) {
+    params.collect_java_stacks = context.getParameter('collect_java_stacks');
+    params.collect_dotnet_stacks = context.getParameter(
+      'collect_dotnet_stacks',
+    );
+  }
+
+  return params;
 }
 
 /**
@@ -259,20 +291,38 @@ function isAndroidTarget(targetInfo) {
 
 /**
  * @param {import("./docs/jsdocs").ReadyExecutionContext} context
+ * @param {import("./docs/jsdocs").RecipeReadyAdvice[]} advice
+ */
+function addTelemetrySpecificationWarning(context, advice) {
+  const cpuName = context.targetInfo().PrimaryCPUName;
+  if (!context.getTelemetrySpecification(cpuName)) {
+    advice.push({
+      ToolName: '',
+      AdviceSeverity: 'warning',
+      MessageCode: telemetrySpecificationUnavailableMessageCode,
+      Metadata: { cpuName },
+      Cause: '',
+    });
+  }
+}
+
+/**
+ * @param {import("./docs/jsdocs").ReadyExecutionContext} context
  */
 function readyHotspots(context) {
   const workload = context.getWorkload();
   const samplingFreq = context.getParameter('sampling_freq');
   const targetInfo = context.targetInfo();
-  const windowsTarget = isWindowsTarget(targetInfo);
+  const hostReformatEnabled = context.getParameter('reformat_on_host');
+  const collectJitDumpsEnabled =
+    context.getParameter('collect_java_stacks') ||
+    context.getParameter('collect_dotnet_stacks');
+  const richDataCaptureEnabled = context.getParameter('rich_data_capture');
 
-  if (windowsTarget) {
+  if (isWindowsTarget(targetInfo)) {
     const tools = generateWperfConfig(workload, buildWperfParams(samplingFreq));
     const toolResponses = context.probeTools(tools);
     const allAdvice = collectToolAdvice(tools, toolResponses);
-    const collectJitDumpsEnabled =
-      context.getParameter('collect_java_stacks') ||
-      context.getParameter('collect_dotnet_stacks');
     if (collectJitDumpsEnabled) {
       allAdvice.push({
         ToolName: TOOL_WPERF.name,
@@ -280,10 +330,36 @@ function readyHotspots(context) {
         MessageCode: readinessMessageCode,
         Metadata: {
           message:
-            'JIT dump collection is not supported on Windows, jitted symbols will not be available.',
+            'JIT dump collection is not supported for Windows targets. Jitted symbols will not be available.',
         },
+        Cause: '',
       });
     }
+    if (hostReformatEnabled) {
+      allAdvice.push({
+        ToolName: TOOL_WPERF.name,
+        AdviceSeverity: 'warning',
+        MessageCode: readinessMessageCode,
+        Metadata: {
+          message:
+            'Reformatting on the host is not supported for Windows targets. Reformatting will be done on the target.',
+        },
+        Cause: '',
+      });
+    }
+    if (richDataCaptureEnabled) {
+      allAdvice.push({
+        ToolName: TOOL_WPERF.name,
+        AdviceSeverity: 'warning',
+        MessageCode: readinessMessageCode,
+        Metadata: {
+          message:
+            'Rich data capture is not supported for Windows targets. Advanced filtering functionality will not be available.',
+        },
+        Cause: '',
+      });
+    }
+    addTelemetrySpecificationWarning(context, allAdvice);
     return {
       status: toolStatusToRecipeStatus(allAdvice),
       advice: allAdvice,
@@ -294,6 +370,32 @@ function readyHotspots(context) {
   const tools = generateNeoprofConfig(workload, params);
   const toolResponses = context.probeTools(tools);
   const allAdvice = collectToolAdvice(tools, toolResponses);
+  if (collectJitDumpsEnabled) {
+    if (isAndroidTarget(targetInfo)) {
+      allAdvice.push({
+        ToolName: TOOL_NEOPROF.name,
+        AdviceSeverity: 'warning',
+        MessageCode: readinessMessageCode,
+        Metadata: {
+          message:
+            'JIT dump collection is not supported for Android targets. Jitted symbols will not be available.',
+        },
+        Cause: '',
+      });
+    } else if (hostReformatEnabled) {
+      allAdvice.push({
+        ToolName: TOOL_NEOPROF.name,
+        AdviceSeverity: 'warning',
+        MessageCode: readinessMessageCode,
+        Metadata: {
+          message:
+            'JIT dump collection is not supported when reformatting on the host. Jitted symbols will not be available.',
+        },
+        Cause: '',
+      });
+    }
+  }
+  addTelemetrySpecificationWarning(context, allAdvice);
   return {
     status: toolStatusToRecipeStatus(allAdvice),
     advice: allAdvice,
@@ -367,6 +469,215 @@ function getRenderParameterIfExists(context, parameterId) {
   return param === null || param === undefined ? null : Number(param);
 }
 
+/**
+ * @param {number} binDuration
+ * @returns {string}
+ */
+function buildProvisionalTimelineSystemWideQuery(binDuration) {
+  return `
+    -- Presentation-layer query for provisional timeline charts.
+    --
+    -- The upstream timeline SQL bundle retains compressed source intervals.
+    -- This legacy full-capture query expands them before summing values across
+    -- all discovered device/thread pairs, then zero-fills uncovered bins to
+    -- match current Streamline rendering behaviour. Treat this as display-only
+    -- policy until Code Hotspots uses viewport-driven queries.
+    WITH series_points AS (
+      SELECT
+        CAST(generated.x_start AS BIGINT) AS x_start,
+        source.value
+      FROM {table} AS source
+      CROSS JOIN LATERAL generate_series(
+        source.start_timestamp,
+        source.end_timestamp - source.bin_duration,
+        source.bin_duration
+      ) AS generated(x_start)
+    ),
+    aggregated_series_points AS (
+      SELECT
+        x_start,
+        SUM(value) AS value
+      FROM series_points
+      GROUP BY x_start
+    ),
+    x_bounds AS (
+      SELECT
+        MIN(x_start) AS min_x_start,
+        MAX(x_start) AS max_x_start
+      FROM aggregated_series_points
+    ),
+    x_domain AS (
+      SELECT generated.x_start
+      FROM x_bounds
+      CROSS JOIN generate_series(
+        CAST(x_bounds.min_x_start AS BIGINT),
+        CAST(x_bounds.max_x_start AS BIGINT),
+        ${binDuration}
+      ) AS generated(x_start)
+    )
+    SELECT
+      CAST(x_domain.x_start AS DOUBLE) / 1000000000.0 AS x_start,
+      COALESCE(aggregated_series_points.value, 0.0) AS value
+    FROM x_domain
+    LEFT JOIN aggregated_series_points
+      ON aggregated_series_points.x_start = x_domain.x_start
+    ORDER BY x_domain.x_start
+  `.trim();
+}
+
+/**
+ * Retrieve and validate the counter metadata recorded for the neoprof tool
+ * invocation that produced the timeline components.
+ *
+ * @param {import("./docs/jsdocs").RenderExecutionContext} context
+ * @returns {Map<string, {title: string, description: string, units: string}>}
+ */
+function getTimelineCounterMetadata(context) {
+  const capabilities = context
+    .getToolCapabilities(0, {
+      toolName: TOOL_NEOPROF.name,
+      invocationIndex: 0,
+    })
+    .list();
+  const metadataBySeriesKey = new Map();
+
+  for (const capability of Object.values(capabilities)) {
+    if (
+      capability?.componentType?.name !==
+        COUNTER_CAPABILITY_COMPONENT_TYPE.name ||
+      capability?.componentType?.version !==
+        COUNTER_CAPABILITY_COMPONENT_TYPE.version ||
+      capability?.state !== 'collected'
+    ) {
+      continue;
+    }
+
+    const payload = capability.payload;
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Timeline counter capability payload must be an object');
+    }
+    if (!Number.isSafeInteger(payload.series_id) || payload.series_id < 0) {
+      throw new Error(
+        'Timeline counter capability series_id must be a non-negative safe integer',
+      );
+    }
+    if (!Number.isSafeInteger(payload.key_type) || payload.key_type < 0) {
+      throw new Error(
+        'Timeline counter capability key_type must be a non-negative safe integer',
+      );
+    }
+    if (typeof payload.title !== 'string' || payload.title.length === 0) {
+      throw new Error('Timeline counter capability title is required');
+    }
+    if (typeof payload.description !== 'string') {
+      throw new Error(
+        'Timeline counter capability description must be a string',
+      );
+    }
+    if (typeof payload.units !== 'string') {
+      throw new Error('Timeline counter capability units must be a string');
+    }
+    const seriesKey = `key_${payload.key_type}_series_${payload.series_id}`;
+    if (metadataBySeriesKey.has(seriesKey)) {
+      throw new Error(`Duplicate timeline counter metadata for ${seriesKey}`);
+    }
+
+    metadataBySeriesKey.set(seriesKey, {
+      title: payload.title,
+      description: payload.description,
+      units: payload.units,
+    });
+  }
+
+  return metadataBySeriesKey;
+}
+
+/**
+ * @param {Array<{
+ *   rawSeriesKey: string,
+ *   keyType: number,
+ *   rendererId: string,
+ *   output: string,
+ *   seriesId: number,
+ *   binDuration: number,
+ * }>} timelineSources
+ * @param {Map<string, {title: string, description: string, units: string}>} metadataBySeriesKey
+ * @returns {{ visualizations: any[] }}
+ */
+function buildProvisionalTimelineVisualization(
+  timelineSources,
+  metadataBySeriesKey,
+) {
+  if (timelineSources.length === 0) {
+    return { visualizations: [] };
+  }
+
+  const tables = {};
+  const groups = {};
+  const rendererId = timelineSources[0].rendererId;
+
+  for (const [groupIndex, source] of timelineSources.entries()) {
+    const groupKey = `${source.rawSeriesKey}_${source.binDuration}`;
+    const binDuration = source.binDuration;
+    const seriesMetadata = metadataBySeriesKey.get(source.rawSeriesKey);
+    const seriesTitle =
+      seriesMetadata?.title ??
+      `Key ${source.keyType}, Series ${source.seriesId}`;
+    tables[groupKey] = [
+      {
+        renderer_id: source.rendererId,
+        output: source.output,
+      },
+    ];
+    groups[groupKey] = {
+      title: seriesTitle,
+      type: 'line',
+      index: groupIndex,
+      description:
+        seriesMetadata?.description ??
+        `Provisional timeline series ${seriesTitle} at ${binDuration} ns resolution.`,
+      config: {
+        xAxisTitle: 'Time (s)',
+        yAxisTitle: 'Value',
+        ...(seriesMetadata?.units.length > 0
+          ? { yAxisUnit: seriesMetadata.units }
+          : {}),
+        customQuery: {
+          tableNamePlaceholder: '{table}',
+          query: buildProvisionalTimelineSystemWideQuery(binDuration),
+        },
+        series: [
+          {
+            type: 'single',
+            name: 'Total',
+            xColumn: 'x_start',
+            yColumn: 'value',
+          },
+        ],
+      },
+    };
+  }
+
+  return {
+    visualizations: [
+      {
+        type: 'timeline',
+        id: 'timeline',
+        rendererId,
+        title: 'Timeline',
+        description: 'Preview provisional timeline data for hotspots analysis.',
+        config: {
+          xAxisUnit: 's',
+          data_source: {
+            tables,
+          },
+          groups,
+        },
+      },
+    ],
+  };
+}
+
 const timeRangeFilter = {
   id: 'time_range',
   type: 'time_range_filter',
@@ -399,6 +710,88 @@ const timeRangeFilter = {
   },
 };
 
+const processFilter = {
+  id: 'process',
+  type: 'process_filter',
+  title: 'Processes',
+  rendererId: 'processes_and_threads',
+  description: 'Include data from a selected process.',
+  parameterBindings: {
+    pid: 'filter_pid',
+    // changing pid should clear tid
+    tid: 'filter_tid',
+  },
+  config: {
+    data_source: {
+      tables: {
+        processes: [
+          { renderer_id: 'processes_and_threads', output: 'processes' },
+        ],
+      },
+    },
+    optionsQuery: {
+      dataSource: 'processes',
+      query:
+        'SELECT CAST(pid AS INTEGER) AS pid, name FROM __table__ ORDER BY pid',
+      tableNamePlaceholder: '__table__',
+    },
+  },
+};
+
+const threadFilter = {
+  id: 'thread',
+  type: 'thread_filter',
+  title: 'Threads',
+  rendererId: 'processes_and_threads',
+  description: 'Include data from a selected thread.',
+  parameterBindings: {
+    // the process selected by `processFilter` is an input to thread filtering
+    // as only a thread from that process can be selected
+    pid: 'filter_pid',
+    tid: 'filter_tid',
+  },
+  config: {
+    data_source: {
+      tables: {
+        threads: [{ renderer_id: 'processes_and_threads', output: 'threads' }],
+      },
+    },
+    optionsQuery: {
+      dataSource: 'threads',
+      query:
+        'SELECT CAST(pid AS INTEGER) AS pid, CAST(tid AS INTEGER) AS tid, name FROM __table__ ORDER BY pid, tid',
+      tableNamePlaceholder: '__table__',
+    },
+  },
+};
+
+function enableFilterIfAvailable(filter, runDescription) {
+  // Treat a missing parameter as disabled; only an explicit true enables time-range filtering.
+  const richDataCaptureEnabled =
+    runDescription.Parameters.rich_data_capture === true;
+
+  if (!richDataCaptureEnabled) {
+    return {
+      ...filter,
+      disabled: {
+        reason:
+          'Global filtering is unavailable for this run. Re-run the recipe with "Collect rich data" enabled.',
+      },
+    };
+  }
+  if (!runDescription.IsRunPhaseTwoComplete) {
+    return {
+      ...filter,
+      disabled: {
+        reason: runDescription.IsRunInProgress
+          ? 'Unavailable until all capture data has been retrieved from the target.'
+          : 'Unavailable because the run ended before all capture data was retrieved from the target.',
+      },
+    };
+  }
+  return filter;
+}
+
 /**
  * @param {import("./docs/jsdocs").RenderExecutionContext} context
  */
@@ -414,6 +807,7 @@ function renderHotspots(context) {
   }
 
   const tool = runToolInfo.tool;
+  const runDescription = context.getRunDescriptions()[0];
   const filterPid = getRenderParameterIfExists(context, 'filter_pid');
   const filterTid = getRenderParameterIfExists(context, 'filter_tid');
   const filterStartTimeNs = getRenderParameterIfExists(
@@ -424,10 +818,8 @@ function renderHotspots(context) {
     context,
     'filter_end_time_ns',
   );
-  const timeRangeNoDataMessage =
-    filterStartTimeNs !== null || filterEndTimeNs !== null
-      ? 'No samples match the selected time range. Try widening or clearing the time range filter.'
-      : null;
+
+  let noDataMessageConfig = {};
 
   const dataSourceSingle = {
     tables: {
@@ -559,6 +951,14 @@ function renderHotspots(context) {
   const dataSource = isComparison ? dataSourceComparison : dataSourceSingle;
   const sourceFiles = isComparison ? sourceFilesComparison : sourceFilesSingle;
   const disassembly = isComparison ? disassemblyComparison : disassemblySingle;
+  const slAnalyzeRerenderDependency = [{ renderer_id: 'sl_analyze' }];
+  let isSlAnalyzeRerendering = false;
+
+  function withSlAnalyzeRerenderDependency(dataSource) {
+    return isSlAnalyzeRerendering
+      ? { ...dataSource, renderers: slAnalyzeRerenderDependency }
+      : dataSource;
+  }
 
   const dataSourceCompareDrilldownStacks = {
     tables: {
@@ -627,7 +1027,7 @@ function renderHotspots(context) {
   };
 
   let renderers = [];
-  const topBarFilters = [];
+  const filters = [];
   // SlAnalyzeRenderer and ProcessesAndThreadsParser are only applicable to neoprof since wperf does not capture an apc dir.
   if (
     context.isRerenderingEnabled() &&
@@ -635,31 +1035,44 @@ function renderHotspots(context) {
     !isComparison
   ) {
     const slAnalyzeConfig = { entity: `tool/${tool.name}/0/` };
-    if (filterPid !== null && Number.isFinite(filterPid) && filterPid > 0) {
-      slAnalyzeConfig.filter_pid = filterPid;
-    }
-    if (filterTid !== null && Number.isFinite(filterTid) && filterTid > 0) {
+    let isFiltering = false;
+    if (filterTid !== null && Number.isFinite(filterTid)) {
       slAnalyzeConfig.filter_tid = filterTid;
+      isFiltering = true;
+    } else if (filterPid !== null && Number.isFinite(filterPid)) {
+      slAnalyzeConfig.filter_pid = filterPid;
+      isFiltering = true;
     }
     if (
       filterStartTimeNs !== null &&
       Number.isFinite(filterStartTimeNs) &&
       filterStartTimeNs >= 0
     ) {
-      slAnalyzeConfig.filter_start_time_ns = filterStartTimeNs;
+      slAnalyzeConfig.filter_start_time_ns = Math.round(filterStartTimeNs);
+      isFiltering = true;
     }
     if (
       filterEndTimeNs !== null &&
       Number.isFinite(filterEndTimeNs) &&
       filterEndTimeNs >= 0
     ) {
-      slAnalyzeConfig.filter_end_time_ns = filterEndTimeNs;
+      slAnalyzeConfig.filter_end_time_ns = Math.round(filterEndTimeNs);
+      isFiltering = true;
     }
+
+    if (isFiltering) {
+      noDataMessageConfig = {
+        noDataMessage:
+          'No samples match the selected filter values. Try loosening or clearing filters.',
+      };
+    }
+
     renderers.push({
       type: 'SlAnalyzeRenderer',
       id: 'sl_analyze',
       config: slAnalyzeConfig,
     });
+    isSlAnalyzeRerendering = true;
     renderers.push({
       type: 'ProcessesAndThreadsParser',
       id: 'processes_and_threads',
@@ -670,20 +1083,19 @@ function renderHotspots(context) {
       id: 'time_range',
       config: { entity: `tool/${tool.name}/0/` },
     });
-    if (!context.getRunDescriptions()[0].IsRunPhaseTwoComplete) {
-      timeRangeFilter.disabled = {
-        reason: context.getRunDescriptions()[0].IsRunInProgress
-          ? 'Unavailable until all capture data has been retrieved from the target.'
-          : 'Unavailable because the run ended before all capture data was retrieved from the target.',
-      };
-    }
-    topBarFilters.push(timeRangeFilter);
+
+    filters.push(enableFilterIfAvailable(timeRangeFilter, runDescription));
+    filters.push(enableFilterIfAvailable(processFilter, runDescription));
+    filters.push(enableFilterIfAvailable(threadFilter, runDescription));
   }
   renderers.push(
     {
       type: 'StreamlineAnalyzeSymbols',
       id: 'streamline_symbols',
-      config: { entity: `tool/${tool.name}/0/` },
+      config: {
+        entity: `tool/${tool.name}/0/`,
+        data_source: withSlAnalyzeRerenderDependency({}),
+      },
     },
     {
       type: 'TargetInfoRenderer',
@@ -703,7 +1115,7 @@ function renderHotspots(context) {
             'relative-order-priority': 'higher',
           },
         ],
-        data_source: dataSource,
+        data_source: withSlAnalyzeRerenderDependency(dataSource),
         entity: `tool/${tool.name}/0/`,
       },
     },
@@ -731,7 +1143,7 @@ function renderHotspots(context) {
             'relative-order-priority': 'higher',
           },
         ],
-        data_source: dataSource,
+        data_source: withSlAnalyzeRerenderDependency(dataSource),
       },
     },
     {
@@ -739,7 +1151,7 @@ function renderHotspots(context) {
       id: 'source_code_attribution',
       config: {
         entity: `tool/${tool.name}/0/`,
-        data_source: sourceFiles,
+        data_source: withSlAnalyzeRerenderDependency(sourceFiles),
       },
     },
     {
@@ -747,7 +1159,7 @@ function renderHotspots(context) {
       id: 'disassembly',
       config: {
         entity: `tool/${tool.name}/0/`,
-        data_source: disassembly,
+        data_source: withSlAnalyzeRerenderDependency(disassembly),
       },
     },
   );
@@ -800,9 +1212,7 @@ function renderHotspots(context) {
           description:
             'View sampled stack traces and identify hot code paths. The leaf function call appears at the top of the graph, and its callers appear below it. The box width represents how often a function appears in the samples.',
           config: {
-            ...(timeRangeNoDataMessage
-              ? { noDataMessage: timeRangeNoDataMessage }
-              : {}),
+            ...noDataMessageConfig,
             data_source: {
               tables: {
                 callstack: [{ renderer_id: 'drilldown', output: 'drilldown' }],
@@ -903,9 +1313,7 @@ function renderHotspots(context) {
           title: 'Functions',
           description: 'Identify functions that consume the most CPU time.',
           config: {
-            ...(timeRangeNoDataMessage
-              ? { noDataMessage: timeRangeNoDataMessage }
-              : {}),
+            ...noDataMessageConfig,
             data_source: {
               tables: {
                 flatFunctions: [{ renderer_id: 'flat', output: 'drilldown' }],
@@ -986,9 +1394,7 @@ function renderHotspots(context) {
           description:
             'View CPU time information for each function grouped by call path. This view includes the function’s own execution time (self) and the time of the function and all the functions that called it (total). Use this view to determine whether execution cost originates in a function or in its call chain.',
           config: {
-            ...(timeRangeNoDataMessage
-              ? { noDataMessage: timeRangeNoDataMessage }
-              : {}),
+            ...noDataMessageConfig,
             data_source: {
               tables: {
                 drilldown: [{ renderer_id: 'drilldown', output: 'drilldown' }],
@@ -1025,6 +1431,29 @@ function renderHotspots(context) {
         },
   ];
 
+  if (context.isNeoprofTimelineEnabled() && !isComparison) {
+    const timelineBindings = findTimelineCounterBindings(
+      context,
+      0,
+      NEOPROF_TIMELINE_COUNTER_PARQUET_PATTERN,
+    );
+    if (timelineBindings.length > 0) {
+      const timelineSourceBundle = buildTimelineSQLRendererBundle({
+        bindings: timelineBindings,
+      });
+      if (timelineSourceBundle.renderers.length > 0) {
+        const timelineCounterMetadata = getTimelineCounterMetadata(context);
+        const timelineVisualization = buildProvisionalTimelineVisualization(
+          timelineSourceBundle.timelineSources,
+          timelineCounterMetadata,
+        );
+
+        renderers.push(...timelineSourceBundle.renderers);
+        visualizations.push(...timelineVisualization.visualizations);
+      }
+    }
+  }
+
   if (isComparison) {
     renderers.push({
       type: 'CompareDrilldownCallStacks',
@@ -1041,7 +1470,11 @@ function renderHotspots(context) {
     });
   }
 
-  return topBarFilters.length > 0
-    ? { renderers, ui: { visualizations, top_bar_filters: topBarFilters } }
-    : { renderers, visualizations };
+  return {
+    renderers,
+    ui: {
+      visualizations,
+      side_panel_filters: filters,
+    },
+  };
 }

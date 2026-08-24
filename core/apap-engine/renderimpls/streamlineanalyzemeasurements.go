@@ -6,6 +6,8 @@ package renderimpls
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -110,7 +112,7 @@ func LookupMeasurementSpec(title string, affiliation string, telemetry *telemetr
 	if !ok {
 		return render.MeasurementSpec{}, false
 	}
-	out := spec // copy to keep catalog immutable
+	out := cloneMeasurementSpec(spec) // clone to keep catalog immutable
 
 	// Telemetry enrichment & description override (optional)
 	if telemetry != nil {
@@ -147,6 +149,23 @@ func LookupMeasurementSpec(title string, affiliation string, telemetry *telemetr
 	AffiliateMeasurementSpec(&out, affiliation)
 
 	return out, true
+}
+
+// cloneMeasurementSpec returns a deep copy of the mutable fields so the
+// cloned specification can be modified without changing the original.
+func cloneMeasurementSpec(spec render.MeasurementSpec) render.MeasurementSpec {
+	out := spec
+	out.Tags = slices.Clone(spec.Tags)
+	out.Aliases = maps.Clone(spec.Aliases)
+	out.ColumnRefs = slices.Clone(spec.ColumnRefs)
+	for i := range out.ColumnRefs {
+		if spec.ColumnRefs[i].RendererID != nil {
+			rendererID := *spec.ColumnRefs[i].RendererID
+			out.ColumnRefs[i].RendererID = &rendererID
+		}
+	}
+	out.GroupIDs = slices.Clone(spec.GroupIDs)
+	return out
 }
 
 func AffiliateMeasurementSpec(out *render.MeasurementSpec, affiliation string) {
@@ -592,6 +611,11 @@ var catalogEntries = []catalogEntry{
 		ShortDescription: "Last level cache read accesses missed per thousand instructions.",
 		Spec:             entry("cache.ll.read.mpki", "mpki", nil, nil),
 	},
+	{
+		Title:            "LL Cache Demand Read MPKI",
+		ShortDescription: "Last level cache demand-read accesses missed per thousand instructions.",
+		Spec:             entry("cache.ll.demand_read.mpki", "mpki", nil, nil),
+	},
 	// Miss_Ratio
 	{
 		Title:            "Branch Misprediction Percentage",
@@ -642,6 +666,11 @@ var catalogEntries = []catalogEntry{
 		Title:            "LL Cache Read Miss Percentage",
 		ShortDescription: "Percentage of last level cache read accesses that missed.",
 		Spec:             entry("cache.ll.read.miss.percent", "percent", nil, nil),
+	},
+	{
+		Title:            "LL Cache Demand Read Miss Percentage",
+		ShortDescription: "Percentage of last level cache demand-read accesses that missed.",
+		Spec:             entry("cache.ll.demand_read.miss.percent", "percent", nil, nil),
 	},
 	// SVE_Effectiveness
 	{
@@ -722,6 +751,11 @@ var catalogEntries = []catalogEntry{
 		Title:            "LL Cache Read Hit Percentage",
 		ShortDescription: "Percentage of last level cache read accesses that hit.",
 		Spec:             entry("cache.ll.read.hit.percent", "percent", nil, nil),
+	},
+	{
+		Title:            "LL Cache Demand Read Hit Percentage",
+		ShortDescription: "Percentage of last level cache demand-read accesses that hit.",
+		Spec:             entry("cache.ll.demand_read.hit.percent", "percent", nil, nil),
 	},
 	// Operation_Mix
 	{

@@ -19,12 +19,12 @@ import (
 	"github.com/Arm-Debug/apap-cli/clients/go/apapproto"
 )
 
-func runDetailsSummarizer(_ string) (insights.RecipeRunSummarizers, error) {
+func runDetailsSummarizer(_ string) insights.RecipeRunSummarizers {
 	return insights.RecipeRunSummarizers{
 		Unbudgeted: []insights.UnbudgetedRunSummarizer{
 			insights.RunDetailsSummarizer,
 		},
-	}, nil
+	}
 }
 
 func runDescriptionFor(recipeName string, result run.RunResult) *run.RunDescription {
@@ -79,28 +79,20 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 		assert.Equal(t, "run_details", resp.GetPayloads()[0].GetName())
 	})
 
-	t.Run("returns error for an unsupported recipe", func(t *testing.T) {
-		renderCalled := false
-
-		_, err := getRunSummaryBundle(
+	t.Run("returns run details for a recipe without additional summaries", func(t *testing.T) {
+		resp, err := getRunSummaryBundle(
 			context.Background(),
-			runDescriptionFor("unsupported_recipe", run.RecipeSuccess),
-			func(context.Context, func(render.Session) error) error {
-				renderCalled = true
-				return nil
+			runDescriptionFor("instruction_mix", run.RecipeSuccess),
+			func(_ context.Context, fn func(render.Session) error) error {
+				return fn(nil)
 			},
 			insights.SummarizersForRecipe,
 			runSummaryBundleTextLimitBytes,
 		)
 
-		require.Error(t, err)
-		msg, ok := err.(*message.MessageImpl)
-		require.True(t, ok)
-		assert.Equal(t, message.EngineInsightsUnsupportedRecipe, msg.Code())
-		assert.Equal(t, "unsupported_recipe", msg.Metadata()["unsupportedRecipe"])
-		assert.NotEmpty(t, msg.Metadata()["supportedRecipesList"])
-		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
-		assert.False(t, renderCalled)
+		require.NoError(t, err)
+		require.Len(t, resp.GetPayloads(), 1)
+		assert.Equal(t, "run_details", resp.GetPayloads()[0].GetName())
 	})
 
 	t.Run("returns error when run was not successful", func(t *testing.T) {
@@ -154,7 +146,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 			func(_ context.Context, fn func(render.Session) error) error {
 				return fn(nil)
 			},
-			func(_ string) (insights.RecipeRunSummarizers, error) {
+			func(_ string) insights.RecipeRunSummarizers {
 				return insights.RecipeRunSummarizers{
 					Unbudgeted: []insights.UnbudgetedRunSummarizer{
 						{
@@ -164,7 +156,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 							},
 						},
 					},
-				}, nil
+				}
 			},
 			runSummaryBundleTextLimitBytes,
 		)
@@ -180,7 +172,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 			func(_ context.Context, fn func(render.Session) error) error {
 				return fn(nil)
 			},
-			func(_ string) (insights.RecipeRunSummarizers, error) {
+			func(_ string) insights.RecipeRunSummarizers {
 				return insights.RecipeRunSummarizers{
 					Unbudgeted: []insights.UnbudgetedRunSummarizer{
 						{
@@ -194,7 +186,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 							},
 						},
 					},
-				}, nil
+				}
 			},
 			1,
 		)
@@ -215,7 +207,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 			func(_ context.Context, fn func(render.Session) error) error {
 				return fn(nil)
 			},
-			func(_ string) (insights.RecipeRunSummarizers, error) {
+			func(_ string) insights.RecipeRunSummarizers {
 				return insights.RecipeRunSummarizers{
 					Unbudgeted: []insights.UnbudgetedRunSummarizer{
 						{
@@ -238,7 +230,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 							Weight: 100,
 						},
 					},
-				}, nil
+				}
 			},
 			100,
 		)
@@ -256,7 +248,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 			func(_ context.Context, fn func(render.Session) error) error {
 				return fn(nil)
 			},
-			func(_ string) (insights.RecipeRunSummarizers, error) {
+			func(_ string) insights.RecipeRunSummarizers {
 				return insights.RecipeRunSummarizers{
 					Unbudgeted: []insights.UnbudgetedRunSummarizer{
 						{
@@ -288,7 +280,7 @@ func TestGetRunSummaryBundleInternal(t *testing.T) {
 							Weight: 3,
 						},
 					},
-				}, nil
+				}
 			},
 			90,
 		)

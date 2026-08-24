@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"io"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -24,6 +25,18 @@ func assertExecutedInLessThan(t testing.TB, f func(), timeout time.Duration) {
 	case <-time.After(timeout):
 		t.Fatalf("Function did not complete executing within %v timeout", timeout)
 	}
+}
+
+func completedStartedProcess(cmd *exec.Cmd, waitErr error) *StartedProcess {
+	process := &StartedProcess{
+		pid:     cmd.Process.Pid,
+		cmd:     cmd,
+		done:    make(chan struct{}),
+		exited:  true,
+		waitErr: waitErr,
+	}
+	close(process.done)
+	return process
 }
 
 func setLogOutputAndLevel(output io.Writer, level log.Level) (restoreLog func()) {

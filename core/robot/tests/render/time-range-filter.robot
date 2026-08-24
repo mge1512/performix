@@ -12,7 +12,7 @@ Resource            ../../resources/keywords/time_range_filter.resource
 Suite Setup         Time Range Filter Suite Setup
 Suite Teardown      Time Range Filter Suite Teardown
 
-Test Tags           render  time_filter
+Test Tags           render  time-filter
 
 
 *** Variables ***
@@ -25,7 +25,7 @@ ${TIME_RANGE_FILTER_SAMPLING_FREQ}      high
 *** Test Cases ***
 The Code Hotspots Run Rendered With Full Time Filter Matches Unfiltered Samples
   [Documentation]  Check that filtering a run over full time range produces unchanged results.
-  [Tags]  code_hotspots
+  [Tags]  code-hotspots
   Given The Run Exists  ${CODE_HOTSPOTS_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples  ${CODE_HOTSPOTS_RUN_ID_1}
   When The Run Is Filtered With Full Time Range  ${CODE_HOTSPOTS_RUN_ID_1}
@@ -33,7 +33,7 @@ The Code Hotspots Run Rendered With Full Time Filter Matches Unfiltered Samples
 
 The Code Hotspots Run Rendered With Partial Time Filter Contains Fewer Samples
   [Documentation]  Check that filtering a run over partial time range produces fewer samples.
-  [Tags]  code_hotspots
+  [Tags]  code-hotspots
   Given The Run Exists  ${CODE_HOTSPOTS_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples  ${CODE_HOTSPOTS_RUN_ID_1}
   When The Run Is Filtered Over A Partial Time Range  ${CODE_HOTSPOTS_RUN_ID_1}
@@ -41,7 +41,7 @@ The Code Hotspots Run Rendered With Partial Time Filter Contains Fewer Samples
 
 The Code Hotspots Run Rendered With Partial Time Filter Keeps Original Time Limits
   [Documentation]  Check that filtering a run over partial time range keeps the original time limits.
-  [Tags]  code_hotspots
+  [Tags]  code-hotspots
   Given The Run Exists  ${CODE_HOTSPOTS_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples  ${CODE_HOTSPOTS_RUN_ID_1}
   When The Run Is Filtered Over A Partial Time Range  ${CODE_HOTSPOTS_RUN_ID_1}
@@ -49,7 +49,7 @@ The Code Hotspots Run Rendered With Partial Time Filter Keeps Original Time Limi
 
 The Instruction Mix Run Rendered With Full Time Filter Matches Unfiltered Samples
   [Documentation]  Check that filtering a run over full time range produces unchanged results.
-  [Tags]  instruction_mix
+  [Tags]  instruction-mix
   [Setup]  Skip Unless Instruction Mix Is Supported On Target
   Given The Run Exists  ${INSTRUCTION_MIX_DYNAMIC_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples
@@ -64,7 +64,7 @@ The Instruction Mix Run Rendered With Full Time Filter Matches Unfiltered Sample
 
 The Instruction Mix Run Rendered With Partial Time Filter Contains Fewer Samples
   [Documentation]  Check that filtering a run over partial time range produces fewer samples.
-  [Tags]  instruction_mix
+  [Tags]  instruction-mix
   [Setup]  Skip Unless Instruction Mix Is Supported On Target
   Given The Run Exists  ${INSTRUCTION_MIX_DYNAMIC_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples
@@ -79,7 +79,7 @@ The Instruction Mix Run Rendered With Partial Time Filter Contains Fewer Samples
 
 The Instruction Mix Run Rendered With Partial Time Filter Keeps Original Time Limits
   [Documentation]  Check that filtering a run over partial time range keeps the original time limits.
-  [Tags]  instruction_mix
+  [Tags]  instruction-mix
   [Setup]  Skip Unless Instruction Mix Is Supported On Target
   Given The Run Exists  ${INSTRUCTION_MIX_DYNAMIC_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples
@@ -94,7 +94,7 @@ The Instruction Mix Run Rendered With Partial Time Filter Keeps Original Time Li
 
 The CPU Microarchitecture Run Rendered With Full Time Filter Matches Unfiltered Samples
   [Documentation]  Check that filtering a run over full time range produces unchanged results.
-  [Tags]  cpu_microarchitecture
+  [Tags]  cpu-microarchitecture
   [Setup]  Skip Unless CPU Microarchitecture Is Supported On Target
   Given The Run Exists  ${CPU_MICROARCH_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples  ${CPU_MICROARCH_RUN_ID_1}
@@ -103,7 +103,7 @@ The CPU Microarchitecture Run Rendered With Full Time Filter Matches Unfiltered 
 
 The CPU Microarchitecture Run Rendered With Partial Time Filter Contains Fewer Samples
   [Documentation]  Check that filtering a run over partial time range produces fewer samples.
-  [Tags]  cpu_microarchitecture
+  [Tags]  cpu-microarchitecture
   [Setup]  Skip Unless CPU Microarchitecture Is Supported On Target
   Given The Run Exists  ${CPU_MICROARCH_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples  ${CPU_MICROARCH_RUN_ID_1}
@@ -112,7 +112,7 @@ The CPU Microarchitecture Run Rendered With Partial Time Filter Contains Fewer S
 
 The CPU Microarchitecture Run Rendered With Partial Time Filter Keeps Original Time Limits
   [Documentation]  Check that filtering a run over partial time range keeps the original time limits.
-  [Tags]  cpu_microarchitecture
+  [Tags]  cpu-microarchitecture
   [Setup]  Skip Unless CPU Microarchitecture Is Supported On Target
   Given The Run Exists  ${CPU_MICROARCH_RUN_ID_1}
   And The Unfiltered Run Contains Periodic Samples  ${CPU_MICROARCH_RUN_ID_1}
@@ -124,16 +124,12 @@ The CPU Microarchitecture Run Rendered With Partial Time Filter Keeps Original T
 Time Range Filter Suite Setup
   Common Setup
   Skip Unless Target OS Is  ${OS_LINUX}
-  Set Enable Rerendering Env Var
-  Set Enable Full Capture Support Env Var
   The Test Target Is Added Successfully
   The Target Is Set To Default Successfully  ${G_TARGET_NAME}
   Generate Time Range Filter Runs
 
 Time Range Filter Suite Teardown
   The Test Target Is Removed Successfully
-  Clear Enable Full Capture Support Env Var
-  Clear Enable Rerendering Env Var
   Common Teardown
 
 Generate Time Range Filter Runs
@@ -166,7 +162,7 @@ Run Time Range Filter Recipe And Extract Run ID
   [Arguments]  ${recipe}  ${extra_args}=${EMPTY}
   Run Recipe
   ...  ${recipe}
-  ...  --workload ${LAUNCH_WORKLOAD} --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG} ${extra_args}
+  ...  --workload ${LAUNCH_WORKLOAD} --param rich_data_capture=true --target ${G_TARGET_NAME} ${DEPLOY_TOOLS_FLAG} ${extra_args}
   The Last Command Succeeded
   ${id} =  Extract The Run ID
   The Run Exists  ${id}

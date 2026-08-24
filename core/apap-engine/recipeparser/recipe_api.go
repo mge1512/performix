@@ -78,29 +78,36 @@ type RunDescription struct {
 }
 
 type RunComponentDescription struct {
-	RelativePath  string
-	FileName      string
-	ComponentType ComponentType
+	RelativePath  string        `json:"relativePath"`
+	FileName      string        `json:"fileName"`
+	ComponentType ComponentType `json:"componentType"`
 }
 
 type ToolConfiguration struct {
-	Name     string
-	Params   map[string]interface{}
-	Workload WorkloadArg
-	Env      map[string]string
+	Name     string            `json:"name"`
+	Params   map[string]any    `json:"params"`
+	Workload WorkloadArg       `json:"workload"`
+	Env      map[string]string `json:"env"`
 }
 
 type RunToolConfigurationsArg struct {
-	ToolConfigs []ToolConfiguration
+	ToolConfigs []ToolConfiguration `json:"toolConfigs"`
+}
+
+type ToolInvocation struct {
+	ToolName        string `json:"toolName"`
+	InvocationIndex int    `json:"invocationIndex"`
 }
 
 // RecipeAPI defines the API functions that we expose to the JS runtime
 type RecipeAPI interface {
 	getRunDescriptions(goja.FunctionCall) goja.Value
 	listRunComponents(goja.FunctionCall) goja.Value
+	getToolCapabilities(goja.FunctionCall) goja.Value
 	getParameter(goja.FunctionCall) goja.Value
 	getRenderParameter(goja.FunctionCall) goja.Value
 	getRenderParameters(goja.FunctionCall) goja.Value
+	setDefaultRenderParameter(goja.FunctionCall) goja.Value
 	getWorkload(goja.FunctionCall) goja.Value
 	getTool(goja.FunctionCall) goja.Value
 	runTools(goja.FunctionCall) goja.Value
@@ -108,6 +115,8 @@ type RecipeAPI interface {
 	logWarn(goja.FunctionCall) goja.Value
 	writeUserMessage(goja.FunctionCall) goja.Value
 	targetInfo(goja.FunctionCall) goja.Value
+	getPrimaryCPUName(goja.FunctionCall) goja.Value
+	getFirstSupportedCPUName(goja.FunctionCall) goja.Value
 	readHostFile(goja.FunctionCall) goja.Value
 	getTelemetrySpecification(goja.FunctionCall) goja.Value
 	probeTools(goja.FunctionCall) goja.Value
@@ -207,6 +216,51 @@ func (r *ConcreteRecipeAPI) getRunDescriptions(call goja.FunctionCall) goja.Valu
 	return r.vm.ToValue(rd)
 }
 
+func (r *ConcreteRecipeAPI) getToolCapabilities(call goja.FunctionCall) goja.Value {
+	log.Debug("Recipe API: getToolCapabilities")
+
+	if len(call.Arguments) != 2 {
+		panic(r.vm.ToValue("getToolCapabilities called with wrong number of parameters"))
+	}
+
+	var runIndex int
+	err := gojautils.ParseObjectFromJS(call.Arguments[0], &runIndex)
+	if err != nil {
+		panic(r.vm.ToValue(err))
+	}
+
+	var toolInvocation ToolInvocation
+	err = gojautils.ParseObjectFromJS(call.Arguments[1], &toolInvocation)
+	if err != nil {
+		panic(r.vm.ToValue(err))
+	}
+
+	capabilities, err := r.execCtx.GetToolCapabilities(runIndex, toolInvocation.ToolName, toolInvocation.InvocationIndex)
+	if err != nil {
+		panic(r.vm.ToValue(err))
+	}
+
+	jsCapabilities := &ConcreteJSToolCapabilities{capabilities: capabilities}
+	result := r.vm.NewObject()
+	if err = result.Set("has", func(hasCall goja.FunctionCall) goja.Value {
+		return toolCapabilitiesMethodHas(hasCall, r, jsCapabilities)
+	}); err != nil {
+		panic(r.vm.ToValue(err))
+	}
+	if err = result.Set("get", func(getCall goja.FunctionCall) goja.Value {
+		return toolCapabilitiesMethodGet(getCall, r, jsCapabilities)
+	}); err != nil {
+		panic(r.vm.ToValue(err))
+	}
+	if err = result.Set("list", func(listCall goja.FunctionCall) goja.Value {
+		return toolCapabilitiesMethodList(listCall, r, jsCapabilities)
+	}); err != nil {
+		panic(r.vm.ToValue(err))
+	}
+
+	return result
+}
+
 func (r *ConcreteRecipeAPI) listRunComponents(call goja.FunctionCall) goja.Value {
 	log.Debug("Recipe API: listRunComponents")
 
@@ -219,8 +273,8 @@ func (r *ConcreteRecipeAPI) listRunComponents(call goja.FunctionCall) goja.Value
 		panic(r.vm.ToValue(err))
 	}
 
-	var entityPath string
-	if err := gojautils.ParseObjectFromJS(call.Arguments[1], &entityPath); err != nil {
+	var componentGlob string
+	if err := gojautils.ParseObjectFromJS(call.Arguments[1], &componentGlob); err != nil {
 		panic(r.vm.ToValue(err))
 	}
 
@@ -229,9 +283,7 @@ func (r *ConcreteRecipeAPI) listRunComponents(call goja.FunctionCall) goja.Value
 		panic(r.vm.ToValue(fmt.Sprintf("run index out of range: %d", runIndex)))
 	}
 
-	components, err := runModels[runIndex].ListEntityComponents(
-		cdf.Entity{RelativePath: entityPath},
-	)
+	components, err := runModels[runIndex].FindComponents(componentGlob)
 	if err != nil {
 		panic(r.vm.ToValue(err))
 	}
@@ -347,6 +399,51 @@ func (r *ConcreteRecipeAPI) getRenderParameters(call goja.FunctionCall) goja.Val
 	}
 
 	return r.vm.ToValue(safeCopy)
+}
+
+func normalizeJSRenderParameterValue(value any) any {
+	switch v := value.(type) {
+	case int64:
+		// JavaScript has one Number type; render parameters represent it as float64.
+		return float64(v)
+	case []any:
+		normalized := make([]any, len(v))
+		for i, item := range v {
+			normalized[i] = normalizeJSRenderParameterValue(item)
+		}
+		return normalized
+	default:
+		return value
+	}
+}
+
+func (r *ConcreteRecipeAPI) setDefaultRenderParameter(call goja.FunctionCall) goja.Value {
+	log.Debug("Recipe API: setDefaultRenderParameter")
+
+	if len(call.Arguments) != 2 {
+		panic(r.vm.ToValue("setDefaultRenderParameter called with wrong number of parameters"))
+	}
+
+	var param string
+	if err := gojautils.ParseObjectFromJS(call.Arguments[0], &param); err != nil {
+		panic(r.vm.ToValue(err))
+	}
+
+	recipeCtx := r.execCtx.GetRecipeCtx()
+	if recipeCtx.BoundRenderParams == nil {
+		panic(r.vm.ToValue(fmt.Sprintf("render parameter does not exist: %v", param)))
+	}
+
+	var value any
+	if !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+		value = normalizeJSRenderParameterValue(call.Arguments[1].Export())
+	}
+
+	if err := recipeCtx.BoundRenderParams.SetDefaultRenderParameter(param, value, recipeCtx.RecipeMetadata.Name); err != nil {
+		panic(r.vm.NewGoError(err))
+	}
+
+	return goja.Undefined()
 }
 
 func (r *ConcreteRecipeAPI) getWorkload(call goja.FunctionCall) goja.Value {
@@ -514,6 +611,46 @@ func (r *ConcreteRecipeAPI) targetInfo(call goja.FunctionCall) goja.Value {
 	return r.vm.ToValue(r.execCtx.TargetInfo())
 }
 
+func (r *ConcreteRecipeAPI) renderRunModel(call goja.FunctionCall, functionName string) cdf.ModelView {
+	if len(call.Arguments) != 1 {
+		panic(r.vm.ToValue(fmt.Sprintf("%s accepts one run index, received %v arguments", functionName, len(call.Arguments))))
+	}
+
+	var runIndex int
+	if err := gojautils.ParseObjectFromJS(call.Arguments[0], &runIndex); err != nil {
+		panic(r.vm.ToValue(err))
+	}
+
+	runModels := r.execCtx.GetRunModels()
+	if runIndex < 0 || runIndex >= len(runModels) {
+		panic(r.vm.ToValue(fmt.Sprintf("%s: run index %v out of bounds for %v runs", functionName, runIndex, len(runModels))))
+	}
+	return runModels[runIndex]
+}
+
+func (r *ConcreteRecipeAPI) getPrimaryCPUName(call goja.FunctionCall) goja.Value {
+	log.Debug("Recipe API: getPrimaryCpuName")
+
+	primaryCPUName, err := renderPrimaryCPUNameFromModel(r.renderRunModel(call, "getPrimaryCpuName"))
+	if err != nil {
+		panic(r.vm.ToValue(err))
+	}
+	return r.vm.ToValue(primaryCPUName)
+}
+
+func (r *ConcreteRecipeAPI) getFirstSupportedCPUName(call goja.FunctionCall) goja.Value {
+	log.Debug("Recipe API: getFirstSupportedCpuName")
+
+	cpuName, ok, err := renderFirstSupportedCPUNameFromModel(r.renderRunModel(call, "getFirstSupportedCpuName"))
+	if err != nil {
+		panic(r.vm.ToValue(err))
+	}
+	if !ok {
+		return goja.Undefined()
+	}
+	return r.vm.ToValue(cpuName)
+}
+
 func convertGojaValuesToString(values []goja.Value) string {
 	var parts []string
 	for _, v := range values {
@@ -573,19 +710,6 @@ func (r *ConcreteRecipeAPI) getTelemetrySpecification(call goja.FunctionCall) go
 	}
 
 	return r.vm.ToValue(specification.JSON)
-}
-
-// ProbeAdvice mirrors tool.ProbeAdvice, providing json tags for serialization
-type ProbeAdvice struct {
-	Message string `json:"message"`
-	Level   string `json:"level"`
-}
-
-// ProbeResult mirrors tool.ProbeResult, providing json tags for serialization
-type ProbeResult struct {
-	Available    bool           `json:"available"`
-	Capabilities map[string]any `json:"capabilities"`
-	Advice       []ProbeAdvice  `json:"advice"`
 }
 
 // probeTools takes a ToolRunConfig and returns the readiness of the tools on the target,

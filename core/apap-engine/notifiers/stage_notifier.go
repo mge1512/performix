@@ -39,6 +39,7 @@ type StageNotifier interface {
 	OnStageProgress(stageInfo StageInfo, stageProgress StageProgress)
 	OnStageCancelled(stageInfo StageInfo)
 	OnRunCreated(runID run.RunID, rc *run.RunCollection)
+	OnRunMetadataChanged(reason run.RunMetadataUpdateReason)
 }
 
 const ClientFileStreamUpdateInterval = time.Millisecond * 250

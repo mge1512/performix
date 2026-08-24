@@ -4,6 +4,7 @@
 package clijson
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -30,6 +31,7 @@ func TestCLIRunDescriptionFromProto(t *testing.T) {
 		Metadata: &apapproto.RunMetadata{
 			Name:       "abcd1234",
 			TargetName: "named_target",
+			SizeBytes:  func() *uint64 { value := uint64(1536); return &value }(),
 			Target: &apapproto.Target{
 				Connection: &apapproto.Target_SshConfig{
 					SshConfig: &apapproto.SSHConnectionConfig{
@@ -51,6 +53,7 @@ func TestCLIRunDescriptionFromProto(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, desc.Name, mockDesc.Metadata.Name)
 		assert.Equal(t, "named_target", desc.TargetName)
+		assert.Equal(t, mockDesc.Metadata.SizeBytes, desc.SizeBytes)
 		assert.Empty(t, desc.RendererOutput)
 
 		// Source code check
@@ -108,6 +111,27 @@ func TestCLIRunDescriptionFromProto(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Contains(t, desc.RendererOutput, "run_extra_error")
 	})
+}
+
+func TestCLIRunDescriptionFromProtoMissingMetadataDoesNotPanic(t *testing.T) {
+	require.NotPanics(t, func() {
+		_, _ = CLIRunDescriptionFromProto("missing-metadata", &apapproto.RunDescription{})
+	})
+}
+
+func TestCLIRunDescriptionRunSizeJSON(t *testing.T) {
+	sizeBytes := uint64(1536)
+	encoded, err := json.Marshal(CLIRunDescription{SizeBytes: &sizeBytes})
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.Equal(t, float64(sizeBytes), fields["size_bytes"])
+
+	encoded, err = json.Marshal(CLIRunDescription{})
+	require.NoError(t, err)
+	fields = nil
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.NotContains(t, fields, "size_bytes")
 }
 
 func TestCLIRunSummaryFromRunDescription(t *testing.T) {

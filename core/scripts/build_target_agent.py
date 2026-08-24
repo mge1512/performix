@@ -11,7 +11,7 @@ import sys
 import json
 
 GORELEASER_INSTALL_PATH = "github.com/goreleaser/goreleaser/v2@latest"
-REQUIRED_TOOLCHAIN = "go1.26.5+auto"
+REQUIRED_TOOLCHAIN = "go1.26.6+auto"
 
 def parse_args():
     parser = argparse.ArgumentParser(

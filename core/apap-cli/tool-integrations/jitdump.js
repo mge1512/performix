@@ -687,21 +687,32 @@ async function filterJitdumpAgentsForPid(engine, pid, asPrivileged) {
 
 /**
  * Checks if a JVM hsperfdata file exists for the given PID.
+ *
+ * Limit the search to the depth used by hsperfdata files. Unrelated private
+ * directories can still make find return a non-zero exit code, so a matching
+ * path in stdout is authoritative.
  * @param {import("../recipes/docs/jsdocs").Engine} engine
  * @param {number} pid
  * @param {boolean} asPrivileged
  * @returns {Promise<boolean>}
  */
 
-// TODO: This check needs to be replaced with an error code check from the JVM Agent.
-//       This is the same check that is made in the JVM agent, we do not want to duplicate this logic.
 async function isJvmProcessPid(engine, pid, asPrivileged) {
   const pidStr = String(pid);
   const check = await engine.execCommand(
-    ['find', '/tmp', '-path', `/tmp/hsperfdata_*/${pidStr}`, '-print', '-quit'],
+    [
+      'find',
+      '/tmp',
+      '-maxdepth',
+      '2',
+      '-path',
+      `/tmp/hsperfdata_*/${pidStr}`,
+      '-print',
+      '-quit',
+    ],
     { asPrivileged: asPrivileged },
   );
-  return check.rc === 0 && check.stdout.trim().length > 0;
+  return check.stdout.trim().length > 0;
 }
 
 /**
@@ -712,8 +723,6 @@ async function isJvmProcessPid(engine, pid, asPrivileged) {
  * @returns {Promise<boolean>}
  */
 
-// TODO: This check needs to be replaced with an error code check from the .NET Agent.
-//       This is the same check that is made in the .NET agent, we do not want to duplicate this logic.
 async function isDotnetProcessPid(engine, pid, asPrivileged) {
   const pidStr = String(pid);
   const check = await engine.execCommand(

@@ -39,6 +39,45 @@ func (rm *RecoveryManager) Run(ctx context.Context) error {
 	return nil
 }
 
+// StartRunSizeBackfill starts a background task that reconciles persisted sizes for completed runs.
+// Failures are logged and do not affect the run result.
+func (rm *RecoveryManager) StartRunSizeBackfill(ctx context.Context) {
+	go rm.backfillRunSizes(ctx)
+}
+
+func (rm *RecoveryManager) backfillRunSizes(ctx context.Context) {
+	runs, err := rm.deps.RunCollection.ListRuns(ctx)
+	if err != nil {
+		logx.FromContext(ctx).
+			WithError(err).
+			Warn("Could not list runs for size reconciliation")
+		return
+	}
+
+	numUpdated := 0
+	for _, runID := range runs {
+		if ctx.Err() != nil {
+			return
+		}
+		// PersistRunSize skips runs in progress and updates terminal run sizes that are missing or outdated.
+		updated, err := rm.deps.RunCollection.PersistRunSize(ctx, runID)
+		if err != nil {
+			logx.FromContext(ctx).
+				WithError(err).
+				WithField("runId", runID.Value).
+				Warn("Could not backfill run size")
+		}
+		if updated {
+			numUpdated++
+		}
+	}
+
+	logx.FromContext(ctx).
+		WithField("runCount", len(runs)).
+		WithField("numRunsUpdated", numUpdated).
+		Info("Run size reconciliation complete")
+}
+
 // recoverStaleRuns searches for stale runs and marks them as failed with an error message.
 // It tries to avoid false positives by locking the run first. If it cannot lock
 // the run, it assumes another process is working on it and skips it.

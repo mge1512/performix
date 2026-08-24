@@ -4,6 +4,7 @@
 package renderimpls
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -115,6 +116,64 @@ func TestLookupMeasurementSpec_NotFound(t *testing.T) {
 func TestLookupMeasurementSpec_NoTelemetryAddsUnknownKind(t *testing.T) {
 	got, _ := LookupMeasurementSpec("Percentage of Total Samples", "", nil)
 	assert.Contains(t, got.Tags, "kind:unknown")
+}
+
+func TestCloneMeasurementSpecCopiesMutableFields(t *testing.T) {
+	rendererID := "renderer"
+	original := render.MeasurementSpec{
+		Tags:       []string{"original-tag"},
+		Aliases:    map[string]string{"original": "alias"},
+		ColumnRefs: []render.ColumnRef{{Table: "original-table", RendererID: &rendererID}},
+		GroupIDs:   []render.MeasurementGroupID{1},
+	}
+
+	cloned := cloneMeasurementSpec(original)
+	cloned.Tags[0] = "changed-tag"
+	cloned.Aliases["original"] = "changed-alias"
+	cloned.ColumnRefs[0].Table = "changed-table"
+	*cloned.ColumnRefs[0].RendererID = "changed-renderer"
+	cloned.GroupIDs[0] = 2
+
+	assert.Equal(t, []string{"original-tag"}, original.Tags)
+	assert.Equal(t, map[string]string{"original": "alias"}, original.Aliases)
+	assert.Equal(t, "original-table", original.ColumnRefs[0].Table)
+	assert.Equal(t, "renderer", *original.ColumnRefs[0].RendererID)
+	assert.Equal(t, []render.MeasurementGroupID{1}, original.GroupIDs)
+}
+
+func TestLookupMeasurementSpecConcurrentResultsAreIndependent(t *testing.T) {
+	const workerCount = 64
+	tp := loadTelemetry(t)
+	start := make(chan struct{})
+	results := make(chan render.MeasurementSpec, workerCount)
+
+	for worker := range workerCount {
+		go func() {
+			<-start
+			spec, ok := LookupMeasurementSpec("Backend Bound", "self", tp)
+			if !ok {
+				results <- render.MeasurementSpec{}
+				return
+			}
+			spec.Aliases[fmt.Sprintf("worker-%d", worker)] = "private"
+			spec.Tags = append(spec.Tags, fmt.Sprintf("worker:%d", worker))
+			results <- spec
+		}()
+	}
+
+	close(start)
+	for range workerCount {
+		spec := <-results
+		require.NotEmpty(t, spec.Identifier)
+	}
+
+	catalogSpec, ok := catalogSpecByTitle("Backend Bound")
+	require.True(t, ok)
+	assert.NotContains(t, catalogSpec.Aliases, "telemetry")
+	for worker := range workerCount {
+		assert.NotContains(t, catalogSpec.Aliases, fmt.Sprintf("worker-%d", worker))
+		assert.NotContains(t, catalogSpec.Tags, fmt.Sprintf("worker:%d", worker))
+	}
 }
 
 func loadTelemetry(t *testing.T) *telemetry.Payload {

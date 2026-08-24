@@ -118,6 +118,39 @@ func (brp BoundRenderParameters) CollapseToMap() map[string]any {
 	return out
 }
 
+// SetDefaultRenderParameter sets a declared render parameter only when its
+// current value is unset. A nil default leaves the parameter unset.
+func (brp *BoundRenderParameters) SetDefaultRenderParameter(id string, value any, source string) error {
+	var declared *RenderParameter
+	for i := range brp.Parameters {
+		if brp.Parameters[i].ID == id {
+			declared = &brp.Parameters[i]
+			break
+		}
+	}
+	if declared == nil {
+		return message.New(RecipeParameterMessages.InvalidParam).WithMetadata(map[string]string{
+			"paramName": id,
+			"source":    source,
+		})
+	}
+
+	if brp.Values[id] != nil || value == nil {
+		return nil
+	}
+
+	if err := validateRenderParameterValue(*declared, value); err != nil {
+		return message.New(RecipeParameterMessages.InvalidParam).WithMetadata(map[string]string{
+			"paramName": id,
+			"value":     fmt.Sprintf("%v", value),
+			"source":    source,
+		}).WithCause(err)
+	}
+
+	brp.Values[id] = value
+	return nil
+}
+
 // BoundParameters bring together parameter definitions and values
 // to be utilised when running a recipe
 type BoundParameters struct {

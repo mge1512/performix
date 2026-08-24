@@ -100,12 +100,12 @@ func expectAvailableRecipes(engine *apapprotomocks.ApapClient, names ...string) 
 
 var expectedBundledRecipeNames = []string{
 	"asct",
-	"asct-new-ui",
 	"cache_sharing",
 	"cmn_analysis",
 	"code_hotspots",
 	"cpu_microarchitecture",
 	"instruction_mix",
+	"java_analysis",
 	"memory_access",
 	"syscall_trace_summary",
 	"system_utilization",

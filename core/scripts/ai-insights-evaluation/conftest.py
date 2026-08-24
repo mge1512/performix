@@ -20,7 +20,9 @@ The most important pytest concepts used here are:
   `--ai-*` options.
 - `pytest_collection_modifyitems`: called after pytest has discovered and
   parametrised tests, but before it runs them. This lets us fail early for
-  missing suite-level inputs such as run archives or API keys.
+  missing suite-level inputs such as API keys.
+- `pytest_sessionfinish`: called after test execution to generate graphs from
+  the completed JUnit report.
 - `pytest_terminal_summary`: called after test execution to add a concise
   human-readable summary derived from pytest's standard recorded properties.
 """
@@ -37,6 +39,7 @@ import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
@@ -48,6 +51,7 @@ from performance_quality import (
     performance_thresholds_from_manifest,
     recorded_performance_properties,
 )
+from recipe_support import PRERECORD_MODES, requires_source_archive, resolve_prerecord_config, resolve_recipe
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -61,8 +65,12 @@ DEFAULT_PRERECORDED_RUN_CACHE = (
     Path.home() / ".cache" / "performix" / "ai-insights-evaluation" / "pre-recorded-runs"
 )
 DEFAULT_ARTIFACTORY_RUN_BASE = "its.apx-prerecorded-runs/ai-insights-evaluation"
+AI_XDIST_PREPARED_ATTR = "_ai_insights_xdist_prepared"
+AI_GRAPH_REPORT_ATTR = "_ai_insights_graph_report"
+AI_INSIGHTS_TEST_NODEID_MARKER = "::test_ai_insights["
 
 sys.path.append(str(SCRIPTS_DIR))
+from junit_attempts import attempts_from_junit
 from run_export_helper import run_cli, sha256_file
 
 
@@ -148,39 +156,24 @@ def pytest_addoption(parser) -> None:
 
 
 @pytest.hookimpl(optionalhook=True)
-def pytest_xdist_setupnodes(config, specs) -> None:
-    """Prepare shared APX inputs before xdist workers run tests.
+def pytest_xdist_node_collection_finished(node, ids) -> None:
+    """Prepare selected inputs after an xdist worker has collected tests.
 
-    xdist workers can run different modes for the same testcase at the same
-    time. Preparing archives and imported runs in the controller prevents those
-    workers racing on shared filesystem paths or daemon run directories.
+    xdist workers collect the same filtered node IDs before any test is
+    scheduled. The first collection is enough to know which run inputs are
+    needed, and the prepared flag prevents later worker callbacks doing the
+    same shared filesystem work again.
     """
 
-    if config.option.collectonly:
+    config = node.config
+    if config.option.collectonly or not _is_ai_insights_collection(ids):
         return
 
-    write_line = _terminal_write_line(config)
-    testcases = _selected_testcases_from_config(config)
-    run_cache = Path(config.getoption("--ai-prerecorded-run-cache")).expanduser().resolve()
-    results_dir = Path(config.getoption("--ai-results-dir")).expanduser().resolve()
-    artifactory_run_base = (config.getoption("--ai-artifactory-run-base") or "").strip()
-    _prepare_run_inputs(
-        testcases,
-        run_cache,
-        artifactory_run_base,
-        results_dir,
-        write_line,
-    )
+    if getattr(config, AI_XDIST_PREPARED_ATTR, False):
+        return
 
-    cli_bin = Path(config.getoption("--ai-cli-bin")).expanduser().resolve()
-    _prepare_imported_runs(
-        testcases,
-        config.cache,
-        cli_bin,
-        run_cache,
-        results_dir,
-        write_line,
-    )
+    setattr(config, AI_XDIST_PREPARED_ATTR, True)
+    _prepare_selected_testcases(config, _selected_testcases_from_nodeids(config, ids))
 
 
 def _add_env_option(group, option_spec: dict[str, str]) -> None:
@@ -206,7 +199,8 @@ def _add_env_option(group, option_spec: dict[str, str]) -> None:
     )
 
 
-def pytest_collection_modifyitems(config, items) -> None:
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_collection_modifyitems(config, items):
     """Validate suite-level runtime inputs after test parametrisation.
 
     The evaluation tests are parametrised by testcase, mode, and attempt. At
@@ -215,15 +209,20 @@ def pytest_collection_modifyitems(config, items) -> None:
     For example, the Hackathon MCP checkout is required only if a collected
     test item uses `hackathon_mcp`.
 
-    Raising `pytest.UsageError` here produces a short configuration error
-    before any testcase body runs. That is clearer than allowing each test item
-    to fail with a stack trace for the same missing API key or archive path.
+    This hook runs after pytest has applied normal filtering, such as `-k`. In
+    serial pytest, downloads can run here. In xdist workers, this hook only
+    validates options; the controller downloads inputs when the first worker
+    reports its filtered test list.
     """
+    yield
+
     if config.option.collectonly:
         return
 
+    if not _is_ai_insights_collection(item.nodeid for item in items):
+        return
+
     missing = []
-    missing_artifacts = []
     for option_spec in (
         OPENAI_API_KEY_OPT,
         PRERECORDED_RUN_CACHE_OPT,
@@ -237,33 +236,13 @@ def pytest_collection_modifyitems(config, items) -> None:
     prerecorded_run_cache = config.getoption("--ai-prerecorded-run-cache")
     if prerecorded_run_cache:
         testcases = _selected_testcases(items)
-        prerecorded_run_cache_path = Path(prerecorded_run_cache).expanduser().resolve()
-        results_dir = Path(config.getoption("--ai-results-dir")).expanduser().resolve()
-        cli_bin = Path(config.getoption("--ai-cli-bin")).expanduser().resolve()
-        artifactory_run_base = (config.getoption("--ai-artifactory-run-base") or "").strip()
         if not missing and not os.environ.get("PYTEST_XDIST_WORKER"):
-            # In serial pytest this hook is the setup point. In xdist workers,
-            # the controller has already prepared these inputs in
-            # pytest_xdist_setupnodes, so workers only validate and run tests.
-            _prepare_run_inputs(
-                testcases,
-                prerecorded_run_cache_path,
-                artifactory_run_base,
-                results_dir,
-                _terminal_write_line(config),
-            )
-            _prepare_imported_runs(
-                testcases,
-                config.cache,
-                cli_bin,
-                prerecorded_run_cache_path,
-                results_dir,
-                _terminal_write_line(config),
-            )
-        missing_artifacts = _missing_run_artifacts(items, prerecorded_run_cache_path)
+            # Serial pytest downloads here. xdist workers skip this because the
+            # controller downloads after seeing the filtered worker collection.
+            _prepare_selected_testcases(config, testcases)
 
-    if missing or missing_artifacts:
-        raise pytest.UsageError(_format_missing_config(missing, missing_artifacts))
+    if missing:
+        raise pytest.UsageError(_format_missing_config(missing, []))
 
 
 def _has_mode(items, mode: str) -> bool:
@@ -291,28 +270,61 @@ def _selected_testcases(items) -> list[dict[str, str]]:
     return testcases
 
 
-def _selected_testcases_from_config(config) -> list[dict[str, str]]:
+def _selected_testcases_from_nodeids(config, nodeids) -> list[dict[str, str]]:
+    """Map filtered pytest node IDs back to manifest testcases."""
+
     manifest_path = Path(config.getoption("--ai-manifest")).expanduser().resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    selected_acts = {
-        act.strip()
-        for act in str(config.getoption("--ai-act")).split(",")
-        if act.strip()
-    }
-    testcases = []
-    seen = set()
+    manifest_by_id = {}
+    defaults = manifest.get("defaults", {})
     for test_case in manifest.get("tests", []):
         if not isinstance(test_case, dict):
             continue
-        if selected_acts and not selected_acts.intersection(test_case.get("acts", [])):
-            continue
         test_id = test_case.get("id")
-        run_artifact = test_case.get("run_artifact")
-        if not test_id or not run_artifact or test_id in seen:
+        if test_id and test_case.get("run_artifact"):
+            manifest_by_id[test_id] = {
+                **test_case,
+                "recipe": resolve_recipe(test_case, defaults),
+                "prerecord": resolve_prerecord_config(test_case, defaults),
+            }
+
+    # xdist gives the controller node IDs, not pytest Items. Match the
+    # parameter id back to the longest manifest id so ids such as
+    # "test_case_2" do not steal "test_case_26-...".
+    testcases = []
+    seen = set()
+    manifest_ids = sorted(manifest_by_id, key=len, reverse=True)
+    for nodeid in nodeids:
+        marker_index = nodeid.find(AI_INSIGHTS_TEST_NODEID_MARKER)
+        if marker_index < 0:
             continue
-        testcases.append(test_case)
+        param_start = marker_index + len(AI_INSIGHTS_TEST_NODEID_MARKER)
+        param_end = nodeid.rfind("]")
+        if param_end < param_start:
+            raise pytest.UsageError(f"AI Insights pytest node ID is missing its parameter id: {nodeid}")
+        param_id = nodeid[param_start:param_end]
+        test_id = next(
+            (
+                test_id
+                for test_id in manifest_ids
+                if param_id == test_id or param_id.startswith(f"{test_id}-")
+            ),
+            None,
+        )
+        if test_id is None:
+            raise pytest.UsageError(
+                f"Could not map AI Insights pytest node ID to a manifest testcase: {nodeid}"
+            )
+        if test_id in seen:
+            continue
+        testcases.append(manifest_by_id[test_id])
         seen.add(test_id)
     return testcases
+
+
+def _is_ai_insights_collection(nodeids) -> bool:
+    """Return whether collected node IDs include AI Insights evaluation tests."""
+    return any(AI_INSIGHTS_TEST_NODEID_MARKER in nodeid for nodeid in nodeids)
 
 
 def _terminal_write_line(config):
@@ -322,6 +334,42 @@ def _terminal_write_line(config):
     return terminalreporter.write_line
 
 
+def _prepare_selected_testcases(
+    config,
+    testcases: list[dict[str, str]],
+    write_line=None,
+) -> None:
+    """Download, extract, and import selected run inputs once.
+
+    These steps write to shared cache paths and APX run storage. Running them in
+    one process avoids races when xdist runs modes for the same testcase on
+    different workers.
+    """
+
+    if write_line is None:
+        write_line = _terminal_write_line(config)
+    run_cache = Path(config.getoption("--ai-prerecorded-run-cache")).expanduser().resolve()
+    results_dir = Path(config.getoption("--ai-results-dir")).expanduser().resolve()
+    artifactory_run_base = (config.getoption("--ai-artifactory-run-base") or "").strip()
+    _prepare_run_inputs(
+        testcases,
+        run_cache,
+        artifactory_run_base,
+        results_dir,
+        write_line,
+    )
+
+    cli_bin = Path(config.getoption("--ai-cli-bin")).expanduser().resolve()
+    _prepare_imported_runs(
+        testcases,
+        config.cache,
+        cli_bin,
+        run_cache,
+        results_dir,
+        write_line,
+    )
+
+
 def _prepare_run_inputs(
     testcases: list[dict[str, str]],
     prerecorded_run_cache: Path,
@@ -329,6 +377,7 @@ def _prepare_run_inputs(
     results_dir: Path,
     write_line=None,
 ) -> None:
+    """Download, check, and extract selected run inputs before tests start."""
     if artifactory_run_base:
         _download_missing_run_artifacts(
             testcases,
@@ -341,6 +390,7 @@ def _prepare_run_inputs(
     if missing_artifacts:
         raise pytest.UsageError(_format_missing_config([], missing_artifacts))
 
+    _validate_prerecorded_metadata(testcases, prerecorded_run_cache)
     _extract_source_archives(testcases, prerecorded_run_cache, results_dir, write_line)
 
 
@@ -352,21 +402,21 @@ def _download_missing_run_artifacts(
 ) -> None:
     """Fetch missing pre-recorded inputs for the selected testcases.
 
-    Keeping the Artifactory fetch here means local and CI runs use the same
-    validation path: pytest first materialises the manifest-selected inputs
-    under the pre-recorded run cache, then the normal missing-file check reports
-    anything still absent.
+    Pytest has already selected the tests by this point. If a download fails
+    here, the selected test cannot run, so report it as a setup error.
     """
 
     wrote_header = False
     for test_case in testcases:
         test_id = test_case["id"]
         archive = prerecorded_run_cache / test_case["run_artifact"]
+        artifact_dir = Path(test_case["run_artifact"]).parent.as_posix()
         source_archive = archive.parent / "test_src.zip"
+        needs_source = _requires_source_archive(test_case)
         missing_files = []
         if not archive.is_file():
             missing_files.append("latest.zip")
-        if not source_archive.is_file():
+        if needs_source and not source_archive.is_file():
             missing_files.append("test_src.zip")
         metadata = archive.parent / "metadata.json"
         if not metadata.is_file():
@@ -381,15 +431,15 @@ def _download_missing_run_artifacts(
         if not archive.is_file():
             _download_artifactory_input(
                 artifactory_run_base,
-                test_id,
+                artifact_dir,
                 "latest.zip",
                 archive.parent,
                 "latest.zip",
             )
-        if not source_archive.is_file():
+        if needs_source and not source_archive.is_file():
             _download_artifactory_input(
                 artifactory_run_base,
-                test_id,
+                artifact_dir,
                 "test_src.zip",
                 archive.parent,
                 "test_src.zip",
@@ -397,7 +447,7 @@ def _download_missing_run_artifacts(
         if not metadata.is_file():
             if not _download_artifactory_input(
                 artifactory_run_base,
-                test_id,
+                artifact_dir,
                 "latest.metadata.json",
                 archive.parent,
                 "metadata.json",
@@ -405,7 +455,7 @@ def _download_missing_run_artifacts(
             ):
                 _download_artifactory_input(
                     artifactory_run_base,
-                    test_id,
+                    artifact_dir,
                     "metadata.json",
                     archive.parent,
                     "metadata.json",
@@ -420,6 +470,8 @@ def _extract_source_archives(
 ) -> None:
     wrote_header = False
     for test_case in testcases:
+        if not _requires_source_archive(test_case):
+            continue
         test_id = test_case["id"]
         archive = prerecorded_run_cache / test_case["run_artifact"]
         source_archive = archive.parent / "test_src.zip"
@@ -450,6 +502,72 @@ def _extract_source_archives(
             )
 
 
+def _validate_prerecorded_metadata(
+    testcases: list[dict[str, str]],
+    prerecorded_run_cache: Path,
+) -> None:
+    """Validate recorded recipe provenance against the manifest."""
+
+    for test_case in testcases:
+        archive = prerecorded_run_cache / test_case["run_artifact"]
+        metadata_path = archive.parent / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise pytest.UsageError(
+                f"Invalid pre-recorded run metadata for {test_case['id']}: {metadata_path}"
+            ) from exc
+        recorded_recipe = str(metadata.get("recipe", "")).strip()
+        expected_recipe = test_case["recipe"]
+        if recorded_recipe != expected_recipe:
+            raise pytest.UsageError(
+                f"Pre-recorded recipe mismatch for {test_case['id']}: "
+                f"manifest={expected_recipe!r}, metadata={recorded_recipe or '<missing>'!r}"
+            )
+        expected_recipe_params = test_case.get("recipe_params", [])
+        recorded_recipe_params = metadata.get("recipe_params", [])
+        if recorded_recipe_params != expected_recipe_params:
+            raise pytest.UsageError(
+                f"Pre-recorded recipe params mismatch for {test_case['id']}: "
+                f"manifest={test_case.get('recipe_params', [])!r}, "
+                f"metadata={metadata.get('recipe_params', [])!r}"
+            )
+        expected_run_modification = test_case.get("run_modification")
+        recorded_run_modification = metadata.get("run_modification")
+        if recorded_run_modification != expected_run_modification:
+            raise pytest.UsageError(
+                f"Pre-recorded run modification mismatch for {test_case['id']}: "
+                f"manifest={expected_run_modification or '<missing>'!r}, "
+                f"metadata={recorded_run_modification or '<missing>'!r}"
+            )
+        try:
+            expected_mode = resolve_prerecord_config(test_case)["mode"]
+        except ValueError as exc:
+            raise pytest.UsageError(f"Invalid testcase profile mode: {exc}") from exc
+        recorded_mode = metadata.get("profile_mode", "launch")
+        if not isinstance(recorded_mode, str) or recorded_mode not in PRERECORD_MODES:
+            raise pytest.UsageError(
+                f"Invalid pre-recorded profile mode for {test_case['id']}: "
+                f"metadata profile_mode={recorded_mode!r}"
+            )
+        if recorded_mode != expected_mode:
+            raise pytest.UsageError(
+                f"Pre-recorded profile mode mismatch for {test_case['id']}: "
+                f"manifest={expected_mode!r}, metadata={recorded_mode!r}"
+            )
+
+
+def _requires_source_archive(test_case: dict[str, Any]) -> bool:
+    """Return source-archive requirement or raise a usage error with testcase context."""
+
+    try:
+        return requires_source_archive(test_case["recipe"], test_case.get("recipe_params"))
+    except ValueError as exc:
+        raise pytest.UsageError(
+            f"Invalid testcase configuration for {test_case['id']}: {exc}"
+        ) from exc
+
+
 def _safe_extract_zip(archive: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     destination_root = destination.resolve()
@@ -471,12 +589,11 @@ def _prepare_imported_runs(
     results_dir: Path,
     write_line=None,
 ) -> None:
-    """Import each selected run once and cache the prepared run id.
+    """Import each selected run before tests start.
 
-    `apx run import` writes into daemon-managed run storage. Running it from
-    multiple workers for the same archive can race on the final run directory
-    rename, so setup imports serially and leaves test execution to reuse the
-    cached run id.
+    `apx run import` writes to shared APX run storage. If several workers
+    import the same archive at once, they can write the same run directory at
+    the same time. Import here once and cache the run id for the tests.
     """
     wrote_header = False
     for test_case in testcases:
@@ -484,8 +601,11 @@ def _prepare_imported_runs(
         archive = prerecorded_run_cache / test_case["run_artifact"]
         source_archive = archive.parent / "test_src.zip"
         archive_sha = sha256_file(archive)
-        source_sha = sha256_file(source_archive)
-        source_root = results_dir / "imported_sources" / test_id / source_sha / "test_src"
+        source_sha = ""
+        source_root = None
+        if _requires_source_archive(test_case):
+            source_sha = sha256_file(source_archive)
+            source_root = results_dir / "imported_sources" / test_id / source_sha / "test_src"
         cache_key = f"ai_insights/imports/{test_id}/{archive_sha}"
         cached = cache.get(cache_key, None)
 
@@ -516,19 +636,23 @@ def _prepare_imported_runs(
             if not run_id:
                 raise ValueError("apx run import --json output did not contain data.new_id.value")
 
-        run_cli([str(cli_bin), "run", "update", run_id, "--source", str(source_root)], cli_bin.parent)
-        cache.set(
-            cache_key,
-            {
-                "run_id": run_id,
-                "archive_sha256": archive_sha,
-                "archive_path": str(archive),
-                "source_archive_sha256": source_sha,
-                "source_archive_path": str(source_archive),
-                "source_root": str(source_root),
-                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        if source_root is not None:
+            run_cli([str(cli_bin), "run", "update", run_id, "--source", str(source_root)], cli_bin.parent)
+        cached_run = {
+            "run_id": run_id,
+            "archive_sha256": archive_sha,
+            "archive_path": str(archive),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        if source_root is not None:
+            cached_run.update(
+                {
+                    "source_archive_sha256": source_sha,
+                    "source_archive_path": str(source_archive),
+                    "source_root": str(source_root),
+                }
+            )
+        cache.set(cache_key, cached_run)
 
 
 def _run_info_succeeds(cli_bin: Path, run_id: str) -> bool:
@@ -614,19 +738,6 @@ def _download_artifactory_input(
     return True
 
 
-def _missing_run_artifacts(items, prerecorded_run_cache: Path) -> list[tuple[str, str, Path]]:
-    """Find missing pre-recorded run inputs for the collected testcases.
-
-    The same testcase can appear more than once because pytest parametrises by
-    mode and attempt. We report each missing testcase input once, rather than
-    repeating the same missing file for every parametrised item.
-    """
-    return _missing_run_artifacts_for_testcases(
-        _selected_testcases(items),
-        prerecorded_run_cache,
-    )
-
-
 def _missing_run_artifacts_for_testcases(
     testcases: list[dict[str, str]],
     prerecorded_run_cache: Path,
@@ -641,9 +752,13 @@ def _missing_run_artifacts_for_testcases(
         archive = prerecorded_run_cache / run_artifact
         if not archive.is_file():
             missing.append((test_id, "run archive", archive))
-        source_archive = archive.parent / "test_src.zip"
-        if not source_archive.is_file():
-            missing.append((test_id, "source archive", source_archive))
+        metadata = archive.parent / "metadata.json"
+        if not metadata.is_file():
+            missing.append((test_id, "metadata", metadata))
+        if _requires_source_archive(test_case):
+            source_archive = archive.parent / "test_src.zip"
+            if not source_archive.is_file():
+                missing.append((test_id, "source archive", source_archive))
     return missing
 
 
@@ -690,6 +805,54 @@ def _option_label(option_spec: dict[str, str]) -> str:
     return f"{option_spec['option']} or {'/'.join(env_vars)}"
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """Generate the graph report after pytest has written its JUnit XML."""
+    del exitstatus
+    config = session.config
+    if hasattr(config, "workerinput") or config.option.collectonly:
+        return
+
+    try:
+        graph_report = _generate_graph_report(config)
+    except Exception as exc:
+        # Graph reporting is post-processing: record ordinary failures without
+        # replacing an existing pytest result. Process-control exceptions propagate.
+        setattr(config, AI_GRAPH_REPORT_ATTR, {"error": str(exc)})
+        if session.exitstatus == pytest.ExitCode.OK:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        return
+
+    if graph_report is not None:
+        setattr(config, AI_GRAPH_REPORT_ATTR, graph_report)
+
+
+def _generate_graph_report(config) -> dict[str, str | int] | None:
+    """Generate graphs from the configured JUnit report, if one was requested."""
+    junit_option = getattr(config.option, "xmlpath", None)
+    if not junit_option:
+        return None
+
+    junit_xml = Path(junit_option).expanduser().resolve()
+    if not junit_xml.is_file():
+        raise FileNotFoundError(f"pytest did not create {junit_xml}")
+    # Adjacent pytest suites can also produce JUnit XML. Only AI Insights
+    # evaluation results record an ai_mode property.
+    if not any(attempt.get("ai_mode") for attempt in attempts_from_junit(junit_xml)):
+        return None
+
+    results_dir = Path(config.getoption("--ai-results-dir")).expanduser().resolve()
+    output_dir = results_dir / "reporting" / "graphs"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
+    import plot_ai_insights_junit
+
+    observations = plot_ai_insights_junit.load_observations(junit_xml)
+    outputs = plot_ai_insights_junit.generate_graphs(observations, output_dir)
+    return {"output_dir": str(output_dir), "file_count": len(outputs)}
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     """Print the AI Insights summary after normal pytest reporting.
 
@@ -700,6 +863,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     """
     reports = _ai_call_reports(terminalreporter)
     if not reports:
+        _write_graph_report_status(terminalreporter, config)
         return
 
     terminalreporter.section("AI Insights evaluation")
@@ -717,6 +881,21 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     )
     for line in rendered_summary.splitlines():
         terminalreporter.write_line(line)
+    _write_graph_report_status(terminalreporter, config)
+
+
+def _write_graph_report_status(terminalreporter, config) -> None:
+    """Report graph generation success or failure in the terminal summary."""
+    graph_report = getattr(config, AI_GRAPH_REPORT_ATTR, None)
+    if not graph_report:
+        return
+    if error := graph_report.get("error"):
+        terminalreporter.write_line(f"AI Insights graph generation failed: {error}", red=True)
+        return
+    terminalreporter.write_line(
+        f"AI Insights graphs: {graph_report['output_dir']} "
+        f"({graph_report['file_count']} files)"
+    )
 
 
 @pytest.hookimpl(hookwrapper=True)

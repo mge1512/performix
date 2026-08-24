@@ -535,6 +535,29 @@ func TestInfoCommand(t *testing.T) {
 		assert.NotContains(t, output, "empty_table")
 	})
 
+	t.Run("prints run size using IEC units when available", func(t *testing.T) {
+		sizeBytes := uint64(1536)
+		output := runInfoText(t, clijson.CLIRunDescription{
+			ID:        "sized-run",
+			RunResult: "success",
+			SizeBytes: &sizeBytes,
+			Target: clijson.CLITarget{
+				JSONTarget: engine_target.JSONTarget{Value: &engine_target.JSONLocalTarget{}},
+			},
+		})
+
+		assert.Contains(t, output, "Run size: 1.5 KiB")
+
+		output = runInfoText(t, clijson.CLIRunDescription{
+			ID:        "legacy-run",
+			RunResult: "success",
+			Target: clijson.CLITarget{
+				JSONTarget: engine_target.JSONTarget{Value: &engine_target.JSONLocalTarget{}},
+			},
+		})
+		assert.NotContains(t, output, "Run size")
+	})
+
 	t.Run("prints compact target info extras", func(t *testing.T) {
 		output := runInfoText(t, clijson.CLIRunDescription{
 			ID:        "target-info-summary",

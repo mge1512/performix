@@ -188,6 +188,41 @@ func TestOnRunCreated_LogsOnSendError(t *testing.T) {
 	stream.AssertExpectations(t)
 }
 
+func TestOnRunMetadataChanged_SendsReasonedMetadataChange(t *testing.T) {
+	tests := []struct {
+		name     string
+		reason   run.RunMetadataUpdateReason
+		expected apapproto.RunMetadataChangeReason
+	}{
+		{
+			name:     "known reason",
+			reason:   run.RunMetadataUpdateReasonSupportsStop,
+			expected: apapproto.RunMetadataChangeReason_RUN_METADATA_CHANGE_REASON_STOP_SUPPORT,
+		},
+		{
+			name:     "unknown reason falls back to unspecified",
+			reason:   run.RunMetadataUpdateReasonUnknown,
+			expected: apapproto.RunMetadataChangeReason_RUN_METADATA_CHANGE_REASON_UNSPECIFIED,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := new(mockRecipeStream)
+			notifier := newNotifier(stream)
+
+			stream.On("Send", mock.MatchedBy(func(resp *apapproto.RecipeResponse) bool {
+				update, ok := resp.SubMessage.(*apapproto.RecipeResponse_RunMetadataChanged)
+				return ok && resp.Id.Value == "test-run-id" && update.RunMetadataChanged.Reason == tt.expected
+			})).Return(nil).Once()
+
+			notifier.OnRunMetadataChanged(tt.reason)
+
+			stream.AssertExpectations(t)
+		})
+	}
+}
+
 // --- SendRecipeStartMessage (standalone function) ---
 
 func TestSendRecipeStartMessage_SendsCorrectProto(t *testing.T) {
@@ -225,10 +260,29 @@ func TestSendRecipeFinishMessage_SendsSuccessFinish(t *testing.T) {
 		return ok &&
 			rf.RecipeFinish.ReturnCode == apapproto.StatusCode_SUCCESS &&
 			rf.RecipeFinish.Error == nil &&
+			!rf.RecipeFinish.BackgroundTransfersRemaining &&
 			resp.Id.Value == "test-run-id"
 	})).Return(nil).Once()
 
 	notifier.SendRecipeFinishMessage(stream, apapproto.StatusCode_SUCCESS, nil)
+
+	stream.AssertExpectations(t)
+}
+
+func TestSendDetachedRecipeFinishMessage_SendsDetachedSuccess(t *testing.T) {
+	stream := new(mockRecipeStream)
+	notifier := newNotifier(stream)
+
+	stream.On("Send", mock.MatchedBy(func(resp *apapproto.RecipeResponse) bool {
+		rf, ok := resp.SubMessage.(*apapproto.RecipeResponse_RecipeFinish)
+		return ok &&
+			rf.RecipeFinish.ReturnCode == apapproto.StatusCode_SUCCESS &&
+			rf.RecipeFinish.Error == nil &&
+			rf.RecipeFinish.BackgroundTransfersRemaining &&
+			resp.Id.Value == "test-run-id"
+	})).Return(nil).Once()
+
+	notifier.SendDetachedRecipeFinishMessage(stream)
 
 	stream.AssertExpectations(t)
 }

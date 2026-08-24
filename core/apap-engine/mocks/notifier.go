@@ -33,3 +33,7 @@ func (m *MockStageNotifier) OnStageCancelled(stageInfo notifiers.StageInfo) {
 func (m *MockStageNotifier) OnRunCreated(runID run.RunID, rc *run.RunCollection) {
 	m.Called(runID, rc)
 }
+
+func (m *MockStageNotifier) OnRunMetadataChanged(reason run.RunMetadataUpdateReason) {
+	m.Called(reason)
+}

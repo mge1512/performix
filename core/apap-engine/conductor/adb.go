@@ -24,15 +24,7 @@ type ADBClient struct {
 	connected       bool
 }
 
-func NewADBClient(serialNumber string, deviceIPAddress *string) *ADBClient {
-	return &ADBClient{
-		serialNumber:    serialNumber,
-		deviceIPAddress: deviceIPAddress,
-		runner:          &ExecADBRunner{},
-	}
-}
-
-func newADBClientWithRunner(serialNumber string, deviceIPAddress *string, runner ADBRunner) *ADBClient {
+func NewADBClient(serialNumber string, deviceIPAddress *string, runner ADBRunner) *ADBClient {
 	return &ADBClient{
 		serialNumber:    serialNumber,
 		deviceIPAddress: deviceIPAddress,
@@ -137,15 +129,31 @@ type ADBRunner interface {
 	Run(args ...string) (string, string, error)
 }
 
-type ExecADBRunner struct{}
+type ExecADBRunner struct {
+	mu         sync.RWMutex
+	executable string
+}
+
+func NewExecADBRunner(executable string) *ExecADBRunner {
+	return &ExecADBRunner{executable: executable}
+}
 
 func (r *ExecADBRunner) Run(args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("adb", args...)
+	r.mu.RLock()
+	adb := r.executable
+	r.mu.RUnlock()
+	cmd := exec.Command(adb, args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+func (r *ExecADBRunner) SetExecutable(executable string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.executable = executable
 }
 
 // TCP DIALER VIA ADB PORT FORWARDING

@@ -9,7 +9,8 @@ For installation of workloads on the remote target, see download_and_prepare_wor
 
 Steps performed by this script:
   1. (Optional) Remote-localhost setup: copy the repo to the target, install Go/gcc
-     if missing, and build the apx CLI natively (avoids possible glibc mismatches).
+     if missing, generate required source, and build the apx CLI
+     natively (avoids possible glibc mismatches).
      Setup is skipped automatically when the local working tree is clean and a
      stamp file on the target already matches the local git commit hash,
      indicating the binary is already up to date. Pass
@@ -55,8 +56,9 @@ Arguments:
   --include-tags TAG      Robot tag to include. May be repeated.
   --exclude-tags TAG      Additional Robot tag to exclude. May be repeated.
   --run-remote-localhost  Enable remote-localhost setup and additionally run tests
-                          with the remote_localhost tag.
+                          with the remote-localhost tag.
   --fail-fast             Stop the Robot run on the first test failure.
+  --retry-failed-count N  Immediately retry a failed Robot test up to N times.
   --results-dir DIR       Where Robot writes output files (default: robot/results).
   --tests-dir DIR         Root directory of Robot test suites (default: robot/tests).
   --runner-os OS          Host OS used to derive exclude tags (Linux/Windows/Darwin).
@@ -113,6 +115,8 @@ import sys
 import tarfile
 import tempfile
 
+from lib.goflags import go_build_tag_flag
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CORE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, os.pardir))
@@ -120,6 +124,7 @@ REPO_ROOT = os.path.abspath(os.path.join(CORE_ROOT, os.pardir))
 
 TARGET_CONFIG_DIR = os.path.join(CORE_ROOT, "robot", "resources", "files", "targets")
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"]
+REMOTE_LOCALHOST_TAG = "remote-localhost"
 
 # Remote directory layout for the remote-localhost test setup.
 REMOTE_BASE = "/tmp/apx-remote-localhost"
@@ -142,6 +147,15 @@ _GO_ARCH_MAP = {
     "x86_64": "amd64",
     "amd64": "amd64",
 }
+
+
+def non_negative_int(value):
+    """Parse a non-negative integer for argparse."""
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -190,7 +204,8 @@ def parse_args():
         default=False,
         help=(
             "Copy the repo to the remote target, install Go/gcc if needed, "
-            "build the apx CLI natively, then include remote_localhost tests."
+            "generate required source, and build the apx CLI natively. "
+            f"Then include {REMOTE_LOCALHOST_TAG} tests."
         ),
     )
     parser.add_argument(
@@ -207,6 +222,13 @@ def parse_args():
         action="store_true",
         default=False,
         help="Pass --exitonfailure to robot so the run stops on the first failure.",
+    )
+    parser.add_argument(
+        "--retry-failed-count",
+        type=non_negative_int,
+        default=0,
+        metavar="N",
+        help="Immediately retry a failed Robot test up to N times (default: 0).",
     )
     parser.add_argument(
         "--results-dir",
@@ -399,23 +421,40 @@ def setup_remote_localhost(target, dry_run=False, force=False):
                 if not rel:
                     return tarinfo
                 parts = rel.split("/")
-                # Exclude node_modules, __pycache__, and Git metadata at any depth.
-                if any(p in {"node_modules", "__pycache__", ".git"} for p in parts):
+                # Exclude dependencies, Python environments, and Git metadata at any depth.
+                if any(p in {"node_modules", "__pycache__", ".git", ".venv"} for p in parts):
                     return None
-                # Exclude dist variants at repo root only.
-                if parts[0].startswith("dist"):
+                # The remote build does not use the GUI or root dist variants.
+                if parts[0] == "gui" or parts[0].startswith("dist"):
                     return None
                 # Exclude core dist variants at the core root only.
                 if len(parts) > 1 and parts[0] == "core" and parts[1].startswith("dist"):
                     return None
-                # Exclude core/robot/results.
+                # Exclude generated Robot output.
                 if parts[:3] == ["core", "robot", "results"]:
+                    return None
+                # Exclude the core/env virtual environment created by setup-venv.sh.
+                if parts[:2] == ["core", "env"]:
+                    return None
+                # get-tools.py creates release-specific copies of the complete tool
+                # tree. The remote build only consumes core/apap-cli/tools.
+                if (
+                    parts[:2] == ["core", "apap-cli"]
+                    and len(parts) > 2
+                    and parts[2].startswith(
+                        ("tools-linux-", "tools-darwin-", "tools-windows-")
+                    )
+                ):
                     return None
                 # Exclude compiled bytecode.
                 if rel.endswith(".pyc"):
                     return None
-                # Exclude the pre-built CLI binary — it will be built natively on the target.
-                if rel in {"core/apap-cli/apx", "core/apap-cli/apx.exe"}:
+                # Exclude outputs that are regenerated on the target.
+                if rel in {
+                    "core/apap-cli/apx",
+                    "core/apap-cli/apx.exe",
+                    "core/apap-engine/message/codes.go",
+                }:
                     return None
                 return tarinfo
 
@@ -454,20 +493,20 @@ def setup_remote_localhost(target, dry_run=False, force=False):
 
     print("=== Installing build toolchain on target ===")
 
-    # Detect distro and install gcc/make via the appropriate package manager.
+    # Detect distro and install GCC via the appropriate package manager.
     # Supported: Debian/Ubuntu (apt), RHEL/CentOS/Amazon Linux (dnf/yum), SLES (zypper).
-    # build-essential (Debian) or the gcc+make+glibc-devel equivalents provide the
+    # build-essential (Debian) or the GCC/glibc-devel equivalents provide the
     # CGO toolchain needed by the Go build.
     remote_host.run(
-        "(gcc --version > /dev/null 2>&1 && make --version > /dev/null 2>&1) || ("
+        "gcc --version > /dev/null 2>&1 || ("
         "  if command -v apt-get > /dev/null 2>&1; then"
         "    sudo apt-get update && sudo apt-get install -y build-essential;"
         "  elif command -v dnf > /dev/null 2>&1; then"
-        "    sudo dnf install -y gcc gcc-c++ make glibc-devel;"
+        "    sudo dnf install -y gcc gcc-c++ glibc-devel;"
         "  elif command -v yum > /dev/null 2>&1; then"
-        "    sudo yum install -y gcc gcc-c++ make glibc-devel;"
+        "    sudo yum install -y gcc gcc-c++ glibc-devel;"
         "  elif command -v zypper > /dev/null 2>&1; then"
-        "    sudo zypper install -y gcc gcc-c++ make glibc-devel;"
+        "    sudo zypper install -y gcc gcc-c++ glibc-devel;"
         "  else"
         "    echo 'error: no supported package manager found (apt-get/dnf/yum/zypper)' >&2; exit 1;"
         "  fi"
@@ -477,16 +516,24 @@ def setup_remote_localhost(target, dry_run=False, force=False):
     go_version = _read_go_version()
     go_tarball = f"go{go_version}.linux-{go_arch}.tar.gz"
     go_url = f"https://go.dev/dl/{go_tarball}"
-    # Install Go only when the required version is not already present
+    go_env = "export PATH=/usr/local/go/bin:$PATH"
+
+    # Install Go only when that executable is not the required version.
     remote_host.run(
+        f"{go_env}; "
         f"_go_ok() {{ command -v \"$1\" > /dev/null 2>&1 && \"$1\" version 2>/dev/null | grep -qF 'go{go_version} '; }}; "
-        f"_go_ok go || _go_ok /usr/local/go/bin/go || "
+        f"_go_ok go || "
         f"(wget -q {go_url} -O /tmp/{go_tarball} && "
+        f"sudo rm -rf /usr/local/go && "
         f"sudo tar -C /usr/local -xzf /tmp/{go_tarball} && "
         f"rm /tmp/{go_tarball})"
     )
 
-    go_env = f"export PATH=$PATH:/usr/local/go/bin"
+    print("=== Generating required Go source on target ===")
+    remote_host.run(
+        f"{go_env} && cd {REMOTE_REPO}/core/apap-engine && "
+        "go generate ./message"
+    )
 
     print("=== Marking pre-bundled tools as fetched on target ===")
     remote_tools_dir = f"{REMOTE_CLI_DIR}/tools"
@@ -496,8 +543,13 @@ def setup_remote_localhost(target, dry_run=False, force=False):
     )
     remote_host.run(f"touch {remote_tools_dir}/.fetched")
 
-    print("=== Building apx CLI natively on target (using make) ===")
-    remote_host.run(f"{go_env} && cd {REMOTE_CLI_DIR} && make build")
+    print("=== Building apx CLI natively on target ===")
+    # keep target bootstrap dependencies minimal, don't assume `task` and `make` are available.
+    # this direct command mirrors the repository's build:apx task
+    remote_host.run(
+        f"{go_env} && cd {REMOTE_CLI_DIR} && "
+        f"go build {go_build_tag_flag()} -o apx"
+    )
 
     # Make the CLI directory world-writable so that non-privileged users can create
     # the config and log directories they need at runtime.
@@ -555,13 +607,13 @@ def build_robot_command(args, target):
 
     Exclude tags are composed as a single OR-joined expression mirroring the
     convention already used in the CI workflows:
-      disabledORdisabled-{os}[ORremote_localhost][OR<extra>...]
+      disabledORdisabled-{os}[ORremote-localhost][OR<extra>...]
     """
     os_lower = args.runner_os.lower()
     exclude_expr = f"disabledORdisabled-{os_lower}"
 
     if not args.run_remote_localhost:
-        exclude_expr += "ORremote_localhost"
+        exclude_expr += f"OR{REMOTE_LOCALHOST_TAG}"
 
     for tag in args.exclude_tags:
         exclude_expr += f"OR{tag}"
@@ -592,8 +644,16 @@ def build_robot_command(args, target):
     if args.run_remote_localhost:
         cmd += ["--variable", f"REMOTE_LOCALHOST_DIR:{REMOTE_CLI_DIR}"]
 
-    if args.fail_fast:
+    if args.fail_fast and not args.retry_failed_count:
         cmd.append("--exitonfailure")
+
+    if args.retry_failed_count:
+        cmd += [
+            "--pythonpath",
+            os.path.join(robot_cwd, "listeners"),
+            "--listener",
+            f"retry_failed.RetryFailed:{args.retry_failed_count}:{args.fail_fast}",
+        ]
 
     if args.test_suite:
         for suite in args.test_suite:

@@ -58,4 +58,20 @@ func TestTargetPIDValidation_agent(t *testing.T) {
 		_, err := stage.Execute(ctx)
 		assert.NoError(t, err)
 	})
+
+	t.Run("returns process listing unsupported error", func(t *testing.T) {
+		client := &targetagentmocks.TargetAgentClient{}
+		agentSupplier := func() *agent.AgentConn { return &agent.AgentConn{Client: client} }
+		stage := NewValidateTargetPIDStage(agentSupplier, 123)
+		unsupportedErr := message.New(message.AgentSystemInfoUnsupportedPlatform).
+			WithMetadata(map[string]string{"platform": "android"})
+		ctx := &recipe.StageContext{
+			Context:                   context.Background(),
+			CachedAgentProcessListErr: unsupportedErr,
+		}
+
+		_, err := stage.Execute(ctx)
+
+		assert.ErrorIs(t, err, unsupportedErr)
+	})
 }

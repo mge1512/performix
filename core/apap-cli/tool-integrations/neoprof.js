@@ -17,13 +17,15 @@ const {
 } = require('./utils.js');
 const { getExecutableFromWorkload } = require('./workload');
 
-let bundleVersion = '2.1.0';
-let rc = 'build-1';
+let slAnalyzeVersion = '2.2.0-build-4';
+let slRecordVersion = '2.2.0.v20260729_1543-neoprof';
 let readinessMessageCode =
   'engine.recipeparser.js_recipe_stage.READINESS_MESSAGE';
 
 const slAnalyzeToolName = 'sl-analyze';
 const slRecordToolName = 'sl-record';
+const slRecordStopDelayMs = 2000;
+const gatorCollectionFinishedMessage = 'Ending capture...';
 
 const jitdumpJvmVersion = '0.9.0';
 const jitdumpJvmToolName = 'jitdump-jvm';
@@ -31,21 +33,52 @@ const jitdumpJvmToolName = 'jitdump-jvm';
 const dotnetAgentVersion = '0.9.0';
 const dotnetAgentToolName = 'dotnet-agent';
 
+const performixGlobal =
+  /** @type {import("../recipes/docs/jsdocs").PerformixGlobal} */ (
+    globalThis['performix']
+  );
+const parquetToJsonName = 'parquet-to-json';
+const parquetToJsonVersion = performixGlobal.engineVersion;
+
 /**
  * Resolve deployment paths for the current engine locality.
  * @param {import("../recipes/docs/jsdocs").Engine} engine
- * @returns {{slAnalyzeDeployPath: string, slRecordDeployPath: string, jitdumpJvmDeployPath: string, dotnetAgentDeployPath: string}}
+ * @returns {{slAnalyzeDeployPath: string, slRecordDeployPath: string, jitdumpJvmDeployPath: string, dotnetAgentDeployPath: string, parquetToJsonDeployPath: string}}
  */
 function getNeoprofPaths(engine) {
   const toolsRoot = engine.toolsRoot();
   const paths = {
-    slAnalyzeDeployPath: `${toolsRoot}/${slAnalyzeToolName}/${bundleVersion}-${rc}/bin/`,
-    slRecordDeployPath: `${toolsRoot}/${slRecordToolName}/${bundleVersion}-${rc}/bin/`,
+    slAnalyzeDeployPath: `${toolsRoot}/${slAnalyzeToolName}/${slAnalyzeVersion}/bin/`,
+    slRecordDeployPath: `${toolsRoot}/${slRecordToolName}/${slRecordVersion}/bin/`,
     jitdumpJvmDeployPath: `${toolsRoot}/${jitdumpJvmToolName}/${jitdumpJvmVersion}/`,
     dotnetAgentDeployPath: `${toolsRoot}/${dotnetAgentToolName}/${dotnetAgentVersion}/`,
+    parquetToJsonDeployPath: `${toolsRoot}/${parquetToJsonName}/${parquetToJsonVersion}/`,
   };
 
   return paths;
+}
+/**
+ * Resolve the file name of the parquet-to-json tool for the current engine locality.
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @returns {string}
+ */
+function getParquetToJSONFilename(engine) {
+  if (engine.getPlatform().OS === 'Windows') {
+    return `${parquetToJsonName}.exe`;
+  }
+  return parquetToJsonName;
+}
+
+/**
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param {import("../recipes/docs/jsdocs").ToolContext} ctx
+ * @returns {boolean}
+ */
+function isRichDataCaptureEnabled(engine, ctx) {
+  return (
+    engine.isFullCaptureSupportEnabled() &&
+    ctx.params.rich_data_capture === true
+  );
 }
 
 /**
@@ -55,6 +88,7 @@ let tool = {
   name: 'neoprof',
   version: '1.1.0',
   supportsWorkloadLaunch: true,
+  reportsCollectionFinished: true,
   deployments: [
     {
       appliesTo: [
@@ -65,19 +99,38 @@ let tool = {
         {
           type: 'tool_bundle',
           name: slRecordToolName,
-          version: `${bundleVersion}-${rc}`,
+          version: slRecordVersion,
           requiredWhen: { type: 'always' },
         },
         {
           type: 'tool_bundle',
           name: slAnalyzeToolName,
-          version: `${bundleVersion}-${rc}`,
+          version: slAnalyzeVersion,
           requiredWhen: { type: 'always' },
         },
         {
           type: 'tool_bundle',
           name: slAnalyzeToolName,
-          version: `${bundleVersion}-${rc}`,
+          version: slAnalyzeVersion,
+          requiredWhen: {
+            type: 'param_is_set',
+            parameters: [{ reformat_on_host: true }],
+          },
+          locality: 'host',
+        },
+        {
+          type: 'tool_bundle',
+          name: parquetToJsonName,
+          version: parquetToJsonVersion,
+          requiredWhen: {
+            type: 'param_is_not_set',
+            parameters: [{ reformat_on_host: true }],
+          },
+        },
+        {
+          type: 'tool_bundle',
+          name: parquetToJsonName,
+          version: parquetToJsonVersion,
           requiredWhen: {
             type: 'param_is_set',
             parameters: [{ reformat_on_host: true }],
@@ -110,13 +163,20 @@ let tool = {
         {
           type: 'tool_bundle',
           name: slRecordToolName,
-          version: `${bundleVersion}-${rc}`,
+          version: slRecordVersion,
           requiredWhen: { type: 'always' },
         },
         {
           type: 'tool_bundle',
           name: slAnalyzeToolName,
-          version: `${bundleVersion}-${rc}`,
+          version: slAnalyzeVersion,
+          requiredWhen: { type: 'always' },
+          locality: 'host',
+        },
+        {
+          type: 'tool_bundle',
+          name: parquetToJsonName,
+          version: parquetToJsonVersion,
           requiredWhen: { type: 'always' },
           locality: 'host',
         },
@@ -233,6 +293,15 @@ let tool = {
         defaultValue: false,
       },
     },
+    {
+      id: 'rich_data_capture',
+      label: 'Collect rich data',
+      description: `Enables the collection of rich data from the target, which enables advanced filtering functionality after the run completes. This can significantly increase host storage usage and transfer time.`,
+      config: {
+        type: 'checkbox',
+        defaultValue: false,
+      },
+    },
   ],
 
   probe: async (engine, ctx) => {
@@ -246,10 +315,21 @@ let tool = {
       advice: [],
     };
 
+    if (isAndroidLaunch(ctx)) {
+      const androidPackageAccessProbe = await probeAndroidPackageAccess(
+        engine,
+        ctx,
+      );
+      if (androidPackageAccessProbe.level !== 'ready') {
+        result.advice.push(androidPackageAccessProbe);
+        return result;
+      }
+    }
+
     const paths = getNeoprofPaths(engine);
     const recordDeploymentProbe = await probeDeployment(
       engine,
-      paths.slRecordDeployPath,
+      paths.slRecordDeployPath + slRecordToolName,
       slRecordToolName,
     );
     const recordDeployed = recordDeploymentProbe.level === 'ready';
@@ -263,12 +343,24 @@ let tool = {
     const localisedPaths = getNeoprofPaths(localisedEngine);
     const analyzeDeploymentProbe = await probeDeployment(
       localisedEngine,
-      localisedPaths.slAnalyzeDeployPath,
+      localisedPaths.slAnalyzeDeployPath + slAnalyzeToolName,
       slAnalyzeToolName,
     );
     const analyzeDeployed = analyzeDeploymentProbe.level === 'ready';
     if (!analyzeDeployed) {
       result.advice.push(analyzeDeploymentProbe);
+    }
+
+    if (engine.isNeoprofTimelineEnabled()) {
+      let parquetToJsonProbe = await probeDeployment(
+        localisedEngine,
+        localisedPaths.parquetToJsonDeployPath +
+          getParquetToJSONFilename(localisedEngine),
+        parquetToJsonName,
+      );
+      if (parquetToJsonProbe.level !== 'ready') {
+        result.advice.push(parquetToJsonProbe);
+      }
     }
 
     result.available = recordDeployed && analyzeDeployed;
@@ -281,9 +373,10 @@ let tool = {
       // Probe the IPC metric name
       let ipcMetricProbe = await probeIpcMetric(engine, ctx);
       if (ipcMetricProbe.level !== 'ready') {
-        probeResponse.advice.push({
-          message: ipcMetricProbe.message,
-          severity: ipcMetricProbe.level,
+        result.advice.push({
+          level: ipcMetricProbe.level,
+          messageCode: ipcMetricProbe.messageCode,
+          metadata: ipcMetricProbe.metadata,
         });
       }
 
@@ -291,17 +384,18 @@ let tool = {
       if (analyzeDeployed) {
         let slAnalyzeProbe = await probeSlAnalyze(localisedEngine, ctx);
         if (slAnalyzeProbe.level !== 'ready') {
-          probeResponse.advice.push({
-            message: slAnalyzeProbe.message,
-            severity: slAnalyzeProbe.level,
+          result.advice.push({
+            level: slAnalyzeProbe.level,
+            messageCode: slAnalyzeProbe.messageCode,
+            metadata: slAnalyzeProbe.metadata,
           });
         }
-        result.capabilities = {
-          supports_strobing: probeResponse.supports_strobing,
-          supports_event_inherit: probeResponse.supports_event_inherit,
-        };
       }
 
+      result.capabilities = {
+        supports_strobing: probeResponse.supports_strobing,
+        supports_event_inherit: probeResponse.supports_event_inherit,
+      };
       result.advice.push(
         ...probeResponse.advice.map((a) => {
           return {
@@ -336,7 +430,11 @@ let tool = {
     const jitdumpJvmDeployPath = paths.jitdumpJvmDeployPath;
     const dotnetAgentDeployPath = paths.dotnetAgentDeployPath;
 
-    await ensureDeployed(engine, paths.slRecordDeployPath, slRecordToolName);
+    await ensureDeployed(
+      engine,
+      paths.slRecordDeployPath + slRecordToolName,
+      slRecordToolName,
+    );
 
     const neoprofAsPrivileged = await isPrivilegeRequired(engine, ctx);
     engine.log('info', `Neoprof privilege requirement: ${neoprofAsPrivileged}`);
@@ -350,19 +448,23 @@ let tool = {
     // permission to write the file.
     // We also set the permissions to 644 to ensure the file is readable by ALL users, otherwise the copy created
     // in the capture.apc will be root owned when sl-record is ran as root and not readable by the (non-root) agent.
-    await engine.execCommand(
-      [
-        'bash',
-        '-c',
-        `touch ${paths.slRecordDeployPath}/gator-log.txt && chmod 644 ${paths.slRecordDeployPath}/gator-log.txt`,
-      ],
-      { asPrivileged: false },
+    await prepareWritableTargetFile(
+      engine,
+      paths.slRecordDeployPath + 'gator-log.txt',
+      'capture log',
     );
 
     let outputDirectory = await engine.createTempDir();
     ctx.metadata.outputDirectory = outputDirectory;
     let captureDirectory = outputDirectory + '/capture.apc';
     ctx.metadata.captureDirectory = captureDirectory;
+    if (isAndroidLaunch(ctx)) {
+      await engine.preserveTempDir(outputDirectory);
+      engine.log(
+        'info',
+        `Android capture directory will be preserved at '${captureDirectory}'.`,
+      );
+    }
 
     let slRecordPath = paths.slRecordDeployPath + slRecordToolName;
     let ipcMetricName = null;
@@ -404,7 +506,7 @@ let tool = {
     if (!ctx.params.reformat_on_host) {
       emitAnalysisFiles(engine, ctx, captureDirectory);
 
-      if (engine.isFullCaptureSupportEnabled()) {
+      if (isRichDataCaptureEnabled(engine, ctx)) {
         emitCaptureDir(engine, captureDirectory);
       }
     }
@@ -642,16 +744,16 @@ let tool = {
 
   onCancel: async (engine, ctx) => {
     ctx.metadata.requestCancel = true;
-    await stopDotnetAgent(engine, ctx);
-    if (ctx.metadata.jitdumpJvmProcHandle) {
-      await ctx.metadata.jitdumpJvmProcHandle.kill();
-    }
-    if (ctx.metadata.recordHandle) {
-      ctx.metadata.recordHandle.kill();
-    }
-    if (ctx.metadata.analyzeHandle) {
-      ctx.metadata.analyzeHandle.kill();
-    }
+    const monitorCleanup = stopGatorLogMonitor(engine, ctx);
+    const results = await Promise.allSettled([
+      ctx.metadata.recordHandle?.kill(),
+      ctx.metadata.analyzeHandle?.kill(),
+      ctx.metadata.jitdumpJvmProcHandle?.kill(),
+      stopDotnetAgent(engine, ctx),
+    ]);
+    await monitorCleanup;
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
   },
 
   onStop: async (engine, ctx) => {
@@ -680,7 +782,7 @@ async function reformatOnHost(engine, ctx) {
 
   emitAnalysisFiles(engine, ctx, hostCaptureDirectory);
 
-  if (engine.isFullCaptureSupportEnabled()) {
+  if (isRichDataCaptureEnabled(engine, ctx)) {
     emitCaptureDir(engine, hostCaptureDirectory);
   }
 
@@ -740,6 +842,10 @@ async function reformatOnHost(engine, ctx) {
     asPrivileged: false,
   });
 
+  if (engine.isNeoprofTimelineEnabled()) {
+    await addToolCapabilities(engine, hostCaptureDirectory);
+  }
+
   engine.endProgress(progressTrackerId);
 }
 
@@ -748,7 +854,11 @@ async function reformatOnTarget(engine, ctx) {
   const progressTrackerId = 'Analyzing collection';
   engine.startProgressTracker(progressTrackerId);
 
-  await ensureDeployed(engine, paths.slAnalyzeDeployPath, slAnalyzeToolName);
+  await ensureDeployed(
+    engine,
+    paths.slAnalyzeDeployPath + slAnalyzeToolName,
+    slAnalyzeToolName,
+  );
 
   ctx.metadata.jitdumpsAvailable =
     ctx.metadata.jitdumpJvmAvailable || ctx.metadata.dotnetAgentAvailable;
@@ -757,7 +867,7 @@ async function reformatOnTarget(engine, ctx) {
   // Do this before starting sl-analyze so that jitdumps are correctly placed in the APC directory.
   await reformatJitdumps(engine, ctx);
 
-  if (ctx.metadata.jitdumpsAvailable && engine.isFullCaptureSupportEnabled()) {
+  if (ctx.metadata.jitdumpsAvailable && isRichDataCaptureEnabled(engine, ctx)) {
     immediateEmitEnrichedJitdumps(
       engine,
       ctx.metadata.outputDirectory + '/capture.apc',
@@ -778,6 +888,13 @@ async function reformatOnTarget(engine, ctx) {
     progressTrackerId,
     asPrivileged: ctx.metadata.neoprofAsPrivileged,
   });
+
+  if (engine.isNeoprofTimelineEnabled()) {
+    await addToolCapabilities(
+      engine,
+      ctx.metadata.outputDirectory + '/capture.apc',
+    );
+  }
 
   engine.endProgress(progressTrackerId);
 }
@@ -858,11 +975,35 @@ async function runSlAnalyze(engine, ctx, args, options) {
   await checkToolFailureFromRun(
     engine,
     ctx,
-    errFileHandle.path,
+    errFileHandle.path(),
     null,
     result.exitCode,
     slAnalyzeToolName,
   );
+}
+
+/**
+ * Checks that the adb shell user can run as the selected Android package.
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param {import("../recipes/docs/jsdocs").ToolContext} ctx
+ * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice>}
+ */
+async function probeAndroidPackageAccess(engine, ctx) {
+  const packageName = ctx.workload.packageName;
+  const result = await engine.execCommand(
+    ['run-as', packageName, '/system/bin/true'],
+    { asPrivileged: false },
+  );
+  if (result.rc === 0) {
+    return { level: 'ready', messageCode: '' };
+  }
+
+  return {
+    level: 'error',
+    messageCode: 'tool_integrations.neoprof.ANDROID_PACKAGE_NOT_DEBUGGABLE',
+    metadata: { package: packageName },
+    cause: `run-as returned exit code ${result.rc}: ${result.stderr.trim()}`,
+  };
 }
 
 /**
@@ -887,10 +1028,7 @@ async function probeSlRecord(engine, ctx) {
   // sl-record writes probe_report.json to the bin directory. Create it as the
   // non-root user first so a root probe cannot leave a stale root-owned report
   // that a later non-root probe cannot overwrite.
-  await engine.execCommand(
-    ['bash', '-c', `touch ${probeReportPath} && chmod 644 ${probeReportPath}`],
-    { asPrivileged: false },
-  );
+  await prepareWritableTargetFile(engine, probeReportPath, 'probe report');
 
   let commandResult = await engine.execCommand(args, {
     asPrivileged: ctx.metadata.neoprofAsPrivileged,
@@ -946,14 +1084,17 @@ async function probeIpcMetric(engine, ctx) {
       );
       return {
         level: 'warning',
-        message: `The name of the IPC metric for the target could not be determined. This means that the IPC metric will not be included in the profiling data collected.`,
+        messageCode: readinessMessageCode,
+        metadata: {
+          message: `The name of the IPC metric for the target could not be determined. This means that the IPC metric will not be included in the profiling data collected.`,
+        },
       };
     }
   }
 
   return {
     level: 'ready',
-    message: '',
+    messageCode: '',
   };
 }
 
@@ -978,7 +1119,10 @@ async function probeSlAnalyze(engine, ctx) {
     );
     return {
       level: 'error',
-      message: `The ${locality} is using a version of the GNU C Library which is incompatible with the '${tool.name}' tool. Upgrade the GNU C Library on the ${locality} machine to at least version GLIBC_${glibcMatch[1]}, or use a different ${locality} machine with a newer operating system.`,
+      messageCode: readinessMessageCode,
+      metadata: {
+        message: `The ${locality} is using a version of the GNU C Library which is incompatible with the '${tool.name}' tool. Upgrade the GNU C Library on the ${locality} machine to at least version GLIBC_${glibcMatch[1]}, or use a different ${locality} machine with a newer operating system.`,
+      },
     };
   }
   await checkAndThrowNeoprofError(
@@ -991,7 +1135,7 @@ async function probeSlAnalyze(engine, ctx) {
 
   return {
     level: 'ready',
-    message: '',
+    messageCode: '',
   };
 }
 
@@ -1007,6 +1151,8 @@ async function runSlRecord(engine, ctx, processArgs) {
     name: 'log-text',
     version: '1.0',
   });
+  await startGatorLogMonitor(engine, ctx);
+  let stopSafetyTimer = null;
   /** @type {import("../recipes/docs/jsdocs").ProcessOptions} */
   let recordProcessOptions = {
     stdout: {
@@ -1048,43 +1194,154 @@ async function runSlRecord(engine, ctx, processArgs) {
   );
   engine.startProgressTracker('Collecting data');
 
-  let recordHandle = await engine.startProcess(
-    processArgs,
-    recordProcessOptions,
-  );
-  ctx.metadata.recordHandle = recordHandle;
+  let result;
+  try {
+    let recordHandle = await engine.startProcess(
+      processArgs,
+      recordProcessOptions,
+    );
+    ctx.metadata.recordHandle = recordHandle;
 
-  if (ctx.metadata.requestCancel) {
-    ctx.metadata.recordHandle.kill();
-  }
+    // Interrupting sl-record immediately can produce invalid output, so queue
+    // Stop requests until the process has had time to initialize.
+    ctx.metadata.allowStop = false;
+    stopSafetyTimer = setTimeout(() => {
+      ctx.metadata.allowStop = true;
+      if (ctx.metadata.requestStop && ctx.metadata.recordHandle) {
+        ctx.metadata.recordHandle.interrupt();
+      }
+    }, slRecordStopDelayMs);
 
-  // Wait for a minimum period before allowing the capture to be stopped.
-  // If sl-record receives SIGINT immediately it fails to produce valid output and sl-analyze will fail.
-  // This is a hacky workaround. There's no guarantee that sl-record will
-  // have been running for sufficient time when this timeout expires.
-  setTimeout(() => {
-    ctx.metadata.allowStop = true;
-    if (ctx.metadata.requestStop && ctx.metadata.recordHandle) {
-      ctx.metadata.recordHandle.interrupt();
+    if (ctx.metadata.requestCancel) {
+      ctx.metadata.recordHandle.kill();
     }
-  }, 2000);
 
-  await drainStreamToFileAndClose(
-    errFilehandle,
-    ctx.metadata.recordHandle.stderr,
-  );
-  let result = await ctx.metadata.recordHandle.wait();
-  ctx.metadata.recordHandle = null;
+    await drainStreamToFileAndClose(
+      errFilehandle,
+      ctx.metadata.recordHandle.stderr,
+    );
+    result = await ctx.metadata.recordHandle.wait();
+    ctx.metadata.recordHandle = null;
+  } finally {
+    if (stopSafetyTimer !== null) {
+      clearTimeout(stopSafetyTimer);
+    }
+    await stopGatorLogMonitor(engine, ctx);
+  }
 
   await checkToolFailureFromRun(
     engine,
     ctx,
-    errFilehandle.path,
+    errFilehandle.path(),
     `${ctx.metadata.outputDirectory}/capture_log.txt`,
     result.exitCode,
     slRecordToolName,
   );
   engine.endProgress('Collecting data');
+}
+
+/**
+ * Follows Gator's detailed log and detects when collection has finished. The
+ * persistent log is truncated before following it so tail starts at the
+ * beginning of this run's output.
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param {import("../recipes/docs/jsdocs").ToolContext} ctx
+ * @returns {Promise<any>}
+ */
+async function startGatorLogMonitor(engine, ctx) {
+  const gatorLogPath = `${getNeoprofPaths(engine).slRecordDeployPath}gator-log.txt`;
+  const truncateResult = await engine.execCommand(
+    ['truncate', '-s', '0', gatorLogPath],
+    { asPrivileged: false },
+  );
+  if (truncateResult.rc !== 0) {
+    throw {
+      code: 'tool_integrations.neoprof.NEOPROF_FAILED',
+      metadata: { tool: 'truncate', code: truncateResult.rc },
+      cause: `failed to truncate capture log file '${gatorLogPath}'`,
+    };
+  }
+
+  const handle = await engine.startProcess(
+    ['tail', '-n', '0', '-f', gatorLogPath],
+    {
+      stdout: { redirect: 'stream' },
+      stderr: { redirect: 'none' },
+    },
+  );
+
+  const monitor = {
+    handle,
+    drainPromise: null,
+  };
+  ctx.metadata.gatorLogMonitor = monitor;
+
+  const detectCollectionFinished = createCollectionFinishedDetector(engine);
+  monitor.drainPromise = forAwait(handle.stdout, async (chunk) => {
+    if (await detectCollectionFinished(chunk)) {
+      await stopGatorLogMonitor(engine, ctx);
+    }
+  }).catch((err) => {
+    engine.log(
+      'warn',
+      `Failed while monitoring gator-log.txt: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+
+  return monitor;
+}
+
+/**
+ * Kills the gator-log tail process without waiting for process exit or stream
+ * drainage. The monitor is removed from the context before the kill request so
+ * overlapping cancellation and normal cleanup calls do not kill it twice.
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param {import("../recipes/docs/jsdocs").ToolContext} ctx
+ * @returns {Promise<void>}
+ */
+async function stopGatorLogMonitor(engine, ctx) {
+  const monitor = ctx.metadata.gatorLogMonitor;
+  if (!monitor) {
+    return;
+  }
+
+  ctx.metadata.gatorLogMonitor = null;
+  try {
+    await monitor.handle.kill();
+  } catch (err) {
+    engine.log(
+      'warn',
+      `Failed to kill gator-log monitor: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Detects Gator's collection-finished message in streamed log data. The retained
+ * suffix allows the marker to be recognised when it is split across chunks.
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @returns {(chunk: string) => Promise<boolean>}
+ */
+function createCollectionFinishedDetector(engine) {
+  let pending = '';
+  let notified = false;
+
+  return async (chunk) => {
+    if (notified) {
+      return false;
+    }
+
+    pending += String(chunk);
+    if (!pending.includes(gatorCollectionFinishedMessage)) {
+      pending = pending.slice(-(gatorCollectionFinishedMessage.length - 1));
+      return false;
+    }
+
+    notified = true;
+    engine.notifyCollectionFinished();
+
+    return true;
+  };
 }
 
 /**
@@ -1154,6 +1411,15 @@ function workloadToSLArgs(workload) {
         `Invalid workload type '${/** @type {any} */ (workload).type}'`,
       );
   }
+}
+
+/**
+ * Returns whether a tool invocation launches an Android application.
+ * @param {import("../recipes/docs/jsdocs").ToolContext} ctx
+ * @returns {boolean}
+ */
+function isAndroidLaunch(ctx) {
+  return ctx.workload?.type === 'androidLaunch';
 }
 
 /**
@@ -1258,7 +1524,7 @@ async function checkAndThrowNeoprofError(engine, ctx, exitCode, stdErr, tool) {
   const ERR_MAP = new Map([
     // m flag means ^ and $ match start and end of each line, rather than whole string
     [
-      /^ERROR: The specified command does not exist or is not executable\. Please verify this executable exists\./m,
+      /^ERROR: The specified command does not exist(?: or is not executable)?\. Please verify this executable exists\./m,
       {
         msgCode:
           'tool_integrations.common.WORKLOAD_NOT_EXIST_OR_NOT_EXECUTABLE',
@@ -1269,7 +1535,7 @@ async function checkAndThrowNeoprofError(engine, ctx, exitCode, stdErr, tool) {
       },
     ],
     [
-      /^ERROR: Failed to run command .*: Permission denied or is a directory$/m,
+      /^ERROR: (?:The specified command is not executable\. Please verify this executable has execute permissions\.|Failed to run command .*: Permission denied or is a directory)$/m,
       {
         msgCode: 'tool_integrations.common.WORKLOAD_NOT_EXECUTABLE',
         metadataProvider: (match) => ({
@@ -1284,6 +1550,15 @@ async function checkAndThrowNeoprofError(engine, ctx, exitCode, stdErr, tool) {
         msgCode: 'tool_integrations.neoprof.PID_NOT_EXIST',
         metadataProvider: (match) => ({
           pid: ctx.workload.pid.toString(),
+        }),
+      },
+    ],
+    [
+      /^run-as: package not debuggable: (.+)$/m,
+      {
+        msgCode: 'tool_integrations.neoprof.ANDROID_PACKAGE_NOT_DEBUGGABLE',
+        metadataProvider: (match) => ({
+          package: match[1],
         }),
       },
     ],
@@ -1467,7 +1742,7 @@ async function emitNeoprofWorkloadExitCode(engine, stdErr, stdOut) {
 
   // Signal termination is mutually exclusive with exit-code termination.
   const exitSignalMatch = stdErr.match(
-    /^ERROR: Command exited with signal (\d+).*$/m,
+    /^(?:ERROR|WARN): Command exited with signal (\d+).*$/m,
   );
   if (exitSignalMatch && exitSignalMatch[1]) {
     engine.writeUserMessage(
@@ -1519,6 +1794,30 @@ async function createRunFile(engine, path, meta) {
 }
 
 /**
+ * Creates a target file as the non-root user and makes it readable by all
+ * users.
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param {string} path
+ * @param {string} description
+ * @returns {Promise<void>}
+ */
+async function prepareWritableTargetFile(engine, path, description) {
+  for (const command of [
+    ['touch', path],
+    ['chmod', '644', path],
+  ]) {
+    const result = await engine.execCommand(command, { asPrivileged: false });
+    if (result.rc !== 0) {
+      throw {
+        code: 'tool_integrations.neoprof.NEOPROF_FAILED',
+        metadata: { tool: command[0], code: result.rc },
+        cause: `failed to prepare ${description} file '${path}'`,
+      };
+    }
+  }
+}
+
+/**
  * Read the contents of a file on the host.
  * @param {import("../recipes/docs/jsdocs").Engine} engine
  * @param {string} path
@@ -1548,7 +1847,7 @@ async function drainStreamToFileAndClose(handle, stream) {
   } catch {
     throw {
       code: 'tool_integrations.neoprof.WRITE_STREAM',
-      metadata: { file: handle.path },
+      metadata: { file: handle.path() },
     };
   } finally {
     await handle.close().catch(() => {});
@@ -1634,7 +1933,7 @@ async function drainStreamToFileAndTrackProgress(
     const message = err instanceof Error ? err.message : String(err);
     throw {
       code: 'tool_integrations.neoprof.WRITE_STREAM',
-      metadata: { file: handle.path, reason: message },
+      metadata: { file: handle.path(), reason: message },
     };
   } finally {
     await handle.close().catch(() => {});
@@ -1723,7 +2022,7 @@ function immediateEmitSlRecordFiles(engine, ctx, outputDir) {
       immediateRetrieval: true,
     },
   );
-  if (engine.isFullCaptureSupportEnabled()) {
+  if (isRichDataCaptureEnabled(engine, ctx)) {
     // Emit capture.apc outputs that are available as soon as sl-record runs. Remaining capture.apc files
     // will be output once sl-analyze finishes
     engine.emitOutput(
@@ -1954,10 +2253,63 @@ function emitDisassemblyFiles(engine, outputDir) {
  * @returns {void}
  */
 function emitNeoprofTimelineFiles(engine, outputDir) {
-  engine.emitOutput(outputDir + '/report-new/apx/**/*', 'output/parquet/**/*', {
-    name: 'neoprof_timeline',
-    version: '1.0',
-  });
+  engine.emitOutput(
+    outputDir + '/report-new/apx/metadata/capture_metadata.parquet',
+    'output/parquet/metadata/capture_metadata.parquet',
+    {
+      name: 'timeline-capture-metadata',
+      version: '1.0',
+    },
+  );
+  engine.emitOutput(
+    outputDir + '/report-new/apx/metadata/counter_series_metadata.parquet',
+    'output/parquet/metadata/counter_series_metadata.parquet',
+    {
+      name: 'timeline-counter-series-metadata',
+      version: '1.0',
+    },
+  );
+  engine.emitOutput(
+    outputDir + '/report-new/apx/metadata/devices.parquet',
+    'output/parquet/metadata/devices.parquet',
+    {
+      name: 'timeline-devices-metadata',
+      version: '1.0',
+    },
+  );
+  engine.emitOutput(
+    outputDir + '/report-new/apx/metadata/processes.parquet',
+    'output/parquet/metadata/processes.parquet',
+    {
+      name: 'timeline-processes-metadata',
+      version: '1.0',
+    },
+  );
+  engine.emitOutput(
+    outputDir + '/report-new/apx/metadata/threads.parquet',
+    'output/parquet/metadata/threads.parquet',
+    {
+      name: 'timeline-threads-metadata',
+      version: '1.0',
+    },
+  );
+  engine.emitOutput(
+    outputDir + '/report-new/apx/timeline/counter_series_files.parquet',
+    'output/parquet/timeline/counter_series_files.parquet',
+    {
+      name: 'timeline-counter-series-files-metadata',
+      version: '1.0',
+    },
+  );
+  engine.emitOutput(
+    outputDir +
+      '/report-new/apx/timeline/key_type=*/series_id=*/bin_duration=*/counter.parquet',
+    'output/parquet/timeline/key_type=*/series_id=*/bin_duration=*/counter.parquet',
+    {
+      name: 'timeline-counter-series-binned-deltas',
+      version: '1.0',
+    },
+  );
 }
 
 /**
@@ -2288,4 +2640,95 @@ async function parseExecutablePaths(engine, captureDirectory) {
     });
   }
   return Array.from(paths.values());
+}
+
+/**
+ * Reads the parquet timeline metadata files produced by `sl-analyze` and records capabilities
+ * for this tool invocation in the run.
+ * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param captureDirectory The path to the root of the `capture.apc` dir
+ * @returns {Promise<void>}
+ */
+async function addToolCapabilities(engine, captureDirectory) {
+  await ensureDeployed(
+    engine,
+    getNeoprofPaths(engine).parquetToJsonDeployPath +
+      getParquetToJSONFilename(engine),
+    parquetToJsonName,
+  );
+
+  const metadataFilePath =
+    captureDirectory +
+    '/report-new/apx/metadata/counter_series_metadata.parquet';
+  const parquetToJsonPath =
+    getNeoprofPaths(engine).parquetToJsonDeployPath +
+    getParquetToJSONFilename(engine);
+
+  const contents = await engine.execCommand(
+    [parquetToJsonPath, metadataFilePath, '--stdout'],
+    {},
+  );
+  if (contents.rc !== 0) {
+    throw {
+      code: 'tool_integrations.neoprof.PARQUET_TO_JSON_RUN_FAILED',
+      metadata: { exitCode: contents.rc },
+      cause: contents.stderr,
+    };
+  }
+
+  let metadata;
+  try {
+    metadata = JSON.parse(contents.stdout);
+  } catch (exception) {
+    throw {
+      code: 'tool_integrations.neoprof.PARQUET_TO_JSON_OUTPUT_PARSE_FAILED',
+      cause: exception,
+    };
+  }
+  if (!Array.isArray(metadata)) {
+    throw {
+      code: 'tool_integrations.neoprof.PARQUET_TO_JSON_OUTPUT_PARSE_FAILED',
+      cause: `tool output is valid JSON, but is not an array: ${contents.stdout}`,
+    };
+  }
+
+  for (const counter of metadata) {
+    await engine.addToolCapability(
+      metadataEntryToCapabilityID(counter),
+      { name: 'tool_capabilities/counter', version: '1.0' },
+      {
+        state: 'collected',
+        payload: {
+          title: `${counter.title}: ${counter.name}`,
+          description: counter.description,
+          units: counter.units,
+          key_type: counter.key_type,
+          series_id: counter.series_id,
+        },
+      },
+    );
+  }
+}
+
+/**
+ * Assembles a capability ID from a given `sl-analyze` counter series metadata entry.
+ * @param metadataEntry
+ * @returns {string}
+ */
+function metadataEntryToCapabilityID(metadataEntry) {
+  return `counter.key_type_${metadataEntry.key_type}.${toCapabilityIDSegment(metadataEntry.title)}.${toCapabilityIDSegment(metadataEntry.name)}.series_${metadataEntry.series_id}`;
+}
+
+/**
+ * Converts the phrase to lower case, and replaces whitespace and unsupported capability ID
+ * characters with underscores.
+ * @param phrase
+ * @returns {string}
+ */
+function toCapabilityIDSegment(phrase) {
+  return phrase
+    .toLowerCase()
+    .replaceAll(/\s/g, '_')
+    .replaceAll(/[()]/g, '')
+    .replaceAll(/[^a-z0-9._-]/g, '_');
 }

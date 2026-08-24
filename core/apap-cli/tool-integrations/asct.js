@@ -7,8 +7,8 @@ const { probePython, probeWhl, normalizeRootOutputAccess } = require('./utils');
 
 const TOOL_NAME = 'asct';
 const TOOL_DISPLAY_NAME = 'ASCT';
-const BUNDLE_VERSION = '0.6.0';
-const BUNDLE_HASH = '6324f8f';
+const BUNDLE_VERSION = '0.6.1';
+const BUNDLE_HASH = 'd2f4360';
 const BUNDLE_DIR = `${TOOL_NAME}/${BUNDLE_VERSION}`;
 const BUNDLE_ARCHIVE_NAME = `${TOOL_NAME}-${BUNDLE_VERSION}+${BUNDLE_HASH}.tar.gz`;
 const INSTALL_DIR_NAME = `install-${BUNDLE_VERSION}+${BUNDLE_HASH}`;
@@ -421,7 +421,7 @@ async function stopActiveAsctProcess(engine, ctx, triggerName) {
     );
     return;
   }
-  const activePid = String(activeHandle.pid);
+  const activePid = String(activeHandle.pid());
 
   /** @param {string} reason */
   const killAndWait = async (reason) => {
@@ -524,10 +524,10 @@ function getInterruptionTriggerName(ctx) {
  */
 function getInterruptionMessageCode(ctx) {
   if (ctx.metadata.interruptType === 'stop') {
-    return 'engine.common.USER_STOPPED_ERROR';
+    return 'engine.common.USER_STOPPED';
   }
   if (ctx.metadata.interruptType === 'cancel') {
-    return 'engine.common.USER_CANCELLATION_ERROR';
+    return 'engine.common.USER_CANCELED';
   }
   return null;
 }
@@ -793,6 +793,137 @@ async function probeNumactl(engine) {
   };
 }
 
+const GCC_MIN_MAJOR_VERSION = 8;
+/**
+ * Check whether `GCC` is available on the target.
+ *
+ * @param {Engine} engine
+ * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice>}
+ */
+async function probeGCC(engine) {
+  const check = await engine.execCommand(
+    ['gcc', '-dumpfullversion', '-dumpversion'],
+    {},
+  );
+
+  if (check.rc !== 0) {
+    return {
+      level: 'warning',
+      messageCode: readinessMessageCode,
+      metadata: {
+        message: 'GCC was not found on PATH. Install GCC version 8 or later.',
+      },
+    };
+  }
+
+  const majorVersion = Number.parseInt(check.stdout.trim().split('.')[0], 10);
+  if (!Number.isInteger(majorVersion) || majorVersion < GCC_MIN_MAJOR_VERSION) {
+    return {
+      level: 'warning',
+      messageCode: readinessMessageCode,
+      metadata: {
+        message:
+          'The installed GCC version is incompatible. ASCT requires GCC version 8 or later.',
+      },
+    };
+  }
+
+  return {
+    level: 'ready',
+    messageCode: '',
+  };
+}
+
+/**
+ * Check whether the c compiler `cc` is available on the target.
+ *
+ * @param {Engine} engine
+ * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice>}
+ */
+async function probeCC(engine) {
+  const check = await engine.execCommand(['cc', '--version'], {});
+
+  if (check.rc !== 0) {
+    return {
+      level: 'warning',
+      messageCode: readinessMessageCode,
+      metadata: {
+        message:
+          'No C compiler named `cc` was found on PATH. Install a C compiler that provides `cc`.',
+      },
+    };
+  }
+
+  return {
+    level: 'ready',
+    messageCode: '',
+  };
+}
+
+/**
+ * Check whether `make` is available on the target.
+ *
+ * @param {Engine} engine
+ * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice>}
+ */
+async function probeMake(engine) {
+  const check = await engine.execCommand(['/usr/bin/make', '--version'], {});
+
+  if (check.rc !== 0) {
+    return {
+      level: 'warning',
+      messageCode: readinessMessageCode,
+      metadata: {
+        message:
+          'ASCT requires an executable GNU Make installation at `/usr/bin/make`.',
+      },
+    };
+  }
+
+  return {
+    level: 'ready',
+    messageCode: '',
+  };
+}
+
+/**
+ * Check the tools needed to build ASCT's bundled native benchmarks.
+ *
+ * @param {Engine} engine
+ * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice[]>}
+ */
+async function probeBuildPrerequisites(engine) {
+  const results = [
+    await probeMake(engine),
+    await probeGCC(engine),
+    await probeCC(engine),
+  ];
+  return results.filter((result) => result.level !== 'ready');
+}
+
+/**
+ * Raise a catalog-backed run error for failed prerequisite checks.
+ *
+ * @param {import("../recipes/docs/jsdocs").ProbeAdvice[]} advice
+ * @param {string} messageCode
+ * @returns {void}
+ */
+function ensurePrerequisites(advice, messageCode) {
+  if (advice.length === 0) {
+    return;
+  }
+
+  throw {
+    code: messageCode,
+    metadata: {
+      details: advice
+        .map((item) => item.metadata?.message)
+        .filter(Boolean)
+        .join(' '),
+    },
+  };
+}
+
 /**
  * @type {import("../recipes/docs/jsdocs").ToolIntegration}}
  */
@@ -800,6 +931,7 @@ let tool = {
   name: TOOL_NAME,
   version: BUNDLE_VERSION,
   supportsWorkloadLaunch: true,
+  supportsStop: false,
   description: {
     short: 'ASCT runs system characterization benchmarks and diagnostics.',
     long: 'ASCT (Arm System Characterization Tool) is a standalone command-line utility for running low-level benchmarks, diagnostic scripts, and system tests on Arm-based platforms. It provides a standardized environment for measuring hardware characteristics such as memory latency/bandwidth and storage performance, supporting platform bring-up, tuning, and architectural comparisons.',
@@ -818,7 +950,7 @@ let tool = {
       id: 'defaultBenchmarks',
       label: 'Default benchmarks',
       description:
-        'Run the ASCT default benchmark set (same behavior as passing no benchmark arguments).',
+        'Run the default latency, bandwidth, NUMA, and core-to-core benchmarks. Loaded latency is not included and can extend the run.',
       config: {
         type: 'checkbox',
         defaultValue: false,
@@ -880,8 +1012,10 @@ let tool = {
       advice.push(numactlAdvice);
     }
 
+    advice.push(...(await probeBuildPrerequisites(engine)));
+
     return {
-      available: advice.length === 0,
+      available: !advice.some((item) => item.level === 'error'),
       capabilities: {},
       advice,
     };
@@ -904,6 +1038,12 @@ let tool = {
     }
     // Catch a stop/cancel that was already recorded before setup begins.
     throwIfInterrupted(engine, ctx, 'ASCT setup');
+
+    const numactlAdvice = await probeNumactl(engine);
+    ensurePrerequisites(
+      numactlAdvice.level === 'ready' ? [] : [numactlAdvice],
+      'tool_integrations.asct.RUNTIME_PREREQUISITE_MISSING',
+    );
 
     await waitForPendingInterruption(engine, ctx, 'ASCT setup');
     let deployPath = buildBundlePath(ctx.toolsRoot);
@@ -933,6 +1073,10 @@ let tool = {
       engine.log(
         'info',
         `No reusable cached ${TOOL_DISPLAY_NAME} install found; rebuilding at ${installRoot}`,
+      );
+      ensurePrerequisites(
+        await probeBuildPrerequisites(engine),
+        'tool_integrations.asct.BUILD_PREREQUISITES_MISSING',
       );
       if (await pathExists(engine, installRoot)) {
         engine.log(

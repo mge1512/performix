@@ -6,9 +6,7 @@ package insights
 import (
 	"context"
 	"encoding/json"
-	"maps"
 	"slices"
-	"strings"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/render"
@@ -45,13 +43,10 @@ type BudgetedRunSummarizerConfig struct {
 	Weight int
 }
 
-// summarizersByRecipe maps recipe names to the summarizer functions that should be applied to runs of that recipe.
-// New recipes and summarizers should be added to this map.
-var summarizersByRecipe = map[string]RecipeRunSummarizers{
+// additionalSummarizersByRecipe maps recipe names to the recipe-specific
+// summarizers applied after the common run details summary.
+var additionalSummarizersByRecipe = map[string]RecipeRunSummarizers{
 	"code_hotspots": {
-		Unbudgeted: []UnbudgetedRunSummarizer{
-			RunDetailsSummarizer,
-		},
 		Budgeted: []BudgetedRunSummarizerConfig{
 			{BudgetedRunSummarizer: HotFunctionsSummarizer, Weight: 1},
 			{BudgetedRunSummarizer: CallTreeSummarizer, Weight: 1},
@@ -61,31 +56,15 @@ var summarizersByRecipe = map[string]RecipeRunSummarizers{
 	},
 }
 
-// SupportedRecipeNames returns names of recipes for which AI Insights summaries can be generated.
-// This single source of truth is shared by the engine's unsupported-recipe error and any caller.
-func SupportedRecipeNames() []string {
-	return slices.Sorted(maps.Keys(summarizersByRecipe))
-}
-
-func supportedRecipeNamesForDisplay() string {
-	return strings.Join(SupportedRecipeNames(), ", ")
-}
-
-// SummarizersForRecipe returns the summarizer configuration for the given recipe, or an error if the recipe is unsupported.
-func SummarizersForRecipe(recipeName string) (RecipeRunSummarizers, error) {
-	summarizers, ok := summarizersByRecipe[recipeName]
-	if ok {
-		return RecipeRunSummarizers{
-			Unbudgeted: slices.Clone(summarizers.Unbudgeted),
-			Budgeted:   slices.Clone(summarizers.Budgeted),
-		}, nil
+// SummarizersForRecipe returns common run details plus any recipe-specific
+// summarizers. Summary generation does not decide whether a recipe supports
+// Dynamic Insights.
+func SummarizersForRecipe(recipeName string) RecipeRunSummarizers {
+	additional := additionalSummarizersByRecipe[recipeName]
+	return RecipeRunSummarizers{
+		Unbudgeted: append([]UnbudgetedRunSummarizer{RunDetailsSummarizer}, additional.Unbudgeted...),
+		Budgeted:   slices.Clone(additional.Budgeted),
 	}
-
-	return RecipeRunSummarizers{}, message.New(message.EngineInsightsUnsupportedRecipe).
-		WithMetadata(map[string]string{
-			"unsupportedRecipe":    recipeName,
-			"supportedRecipesList": supportedRecipeNamesForDisplay(),
-		})
 }
 
 // NewRunSummary creates a RunSummary with the given name, prompt fragment, and payload, marshaling the payload to JSON.

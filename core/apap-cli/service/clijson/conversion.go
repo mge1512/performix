@@ -48,6 +48,7 @@ type CLIRunDescription struct {
 	Timeout             uint32                             `json:"timeout"`
 	RunResult           string                             `json:"run_result"`
 	RunError            string                             `json:"run_error"`
+	SizeBytes           *uint64                            `json:"size_bytes,omitempty"`
 	RendererOutput      map[string]CLITableWithDescription `json:"renderer_output,omitempty"`
 	HostSourceCodePaths run.HostSourceCodePath             `json:"host_source_code_paths"`
 }
@@ -164,6 +165,11 @@ func CLIRunDescriptionFromListedRunProto(listed *apapproto.ListedRun) (CLIRunDes
 }
 
 func CLIRunDescriptionFromProto(id string, item *apapproto.RunDescription) (CLIRunDescription, error) {
+	var sizeBytes *uint64
+	if item.Metadata != nil {
+		sizeBytes = item.Metadata.SizeBytes
+	}
+
 	mappedParams := map[string]any{}
 	for k, v := range item.Metadata.GetParameters() {
 		mappedParams[k] = v.AsInterface()
@@ -188,6 +194,7 @@ func CLIRunDescriptionFromProto(id string, item *apapproto.RunDescription) (CLIR
 		Timeout:             item.Metadata.GetTimeout(),
 		RunResult:           item.Metadata.GetRunResult(),
 		RunError:            item.Metadata.GetRunError(),
+		SizeBytes:           sizeBytes,
 		TargetName:          item.Metadata.GetTargetName(),
 	}
 

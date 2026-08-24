@@ -21,6 +21,7 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-cli/service/clijson"
 	"github.com/Arm-Debug/apap-cli/apap-cli/service/run"
 	engine_target "github.com/Arm-Debug/apap-cli/apap-engine/target"
+	"github.com/Arm-Debug/apap-cli/apap-engine/util"
 	"github.com/Arm-Debug/apap-cli/clients/go/apapproto"
 )
 
@@ -59,9 +60,12 @@ func printRun(e clijson.CLIRunDescription, out io.Writer) {
 	field("Name", e.Name)
 	field("ID", e.ID)
 	field("Result", e.RunResult)
+	field("Engine Version", e.EngineVersion)
 	maybeField("Start Time", e.StartTime)
 	maybeField("End Time", e.EndTime)
-	field("Engine Version", e.EngineVersion)
+	if e.SizeBytes != nil {
+		field("Run size", util.FormatBytesIEC(*e.SizeBytes))
+	}
 
 	// If the run failed, e.RunError will be populated
 	// If we failed to get run information for a run, e.LoadErrorMessage will be populated

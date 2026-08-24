@@ -17,6 +17,7 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf/semver"
 	"github.com/Arm-Debug/apap-cli/apap-engine/logging/logx"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/run"
 	"github.com/Arm-Debug/apap-cli/apap-engine/targetsession"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool"
@@ -304,26 +305,26 @@ func createRenderer(ctx context.Context, factory RendererFactory, config Rendere
 	return renderer, nil
 }
 
-func parseDataSources(configs RendererConfigList) ([]map[string][]DataSource, []error) {
-	dataSources := make([]map[string][]DataSource, len(configs))
+func parseDependencies(configs RendererConfigList) ([]Dependencies, []error) {
+	dependencies := make([]Dependencies, len(configs))
 	configErrs := make([]error, len(configs))
 	for i, conf := range configs {
-		ds, err := ParseDataSourcesFromConfig(conf.ConfigJSON)
-		dataSources[i] = ds
+		dependency, err := ParseDependenciesFromConfig(conf.ConfigJSON)
+		dependencies[i] = dependency
 		configErrs[i] = err
 	}
 
-	return dataSources, configErrs
+	return dependencies, configErrs
 }
 
-func createDataSources(configs RendererConfigList) ([]map[string][]DataSource, []error, error) {
+func createDependencies(configs RendererConfigList) ([]Dependencies, []error, error) {
 	if err := validateRendererConfigList(configs); err != nil {
 		return nil, nil, err
 	}
 
-	// Parse data sources first - these are need to construct the renderer graph
-	dataSources, configErrs := parseDataSources(configs)
-	return dataSources, configErrs, nil
+	// Parse dependencies first - these are needed to construct the renderer graph.
+	dependencies, configErrs := parseDependencies(configs)
+	return dependencies, configErrs, nil
 }
 
 func createRenderers(ctx context.Context, factory RendererFactory, configs RendererConfigList, errs []error) (RendererList, []error) {
@@ -377,10 +378,38 @@ func initializeRenderers(ctx context.Context, session Session, rendererSpec Rend
 			continue
 		}
 
+		if rendererSpec.Dependencies[i].Renderers != nil {
+			rendererErrs := merge(errs, initializeErrs)
+			dependencyErr := resolveRendererDependencyStatus(rendererSpec, i, func(dependencyIndex int) (bool, error) {
+				if dependencyIndex >= len(rendererErrs) {
+					return false, nil
+				}
+
+				// Renderers are initialized in the configured order, rather than topological order.
+				done := dependencyIndex < i
+				return done, rendererErrs[dependencyIndex]
+			})
+			if dependencyErr != nil {
+				initializeErrs[i] = dependencyErr
+
+				if !errors.Is(dependencyErr, cdf.ErrComponentPending) {
+					logx.FromContext(ctx).WithFields(log.Fields{"renderer": rendererSpec.Configs[i].Name}).Info("Skipping renderer because a renderer dependency failed")
+				} else {
+					emitPendingRendererOutputSpec(session, renderer.GetOutputSpec(), RendererIdentity{
+						Index: i,
+						ID:    rendererSpec.Configs[i].ID,
+						Name:  rendererSpec.Configs[i].Name,
+					})
+					logx.FromContext(ctx).WithFields(log.Fields{"renderer": rendererSpec.Configs[i].Name}).Info("Renderer dependency is pending; producing pending outputs and skipping")
+				}
+				continue
+			}
+		}
+
 		logx.FromContext(ctx).WithFields(log.Fields{"renderer": rendererSpec.Configs[i].Name}).Info("Initializing renderer")
 
 		var resolvedDataSources TableRefMap
-		if ds := rendererSpec.DataSources[i]; ds != nil {
+		if ds := rendererSpec.Dependencies[i].Tables; ds != nil {
 			resolvedDataSources, err = ResolveDataSources(session, ds, renderers)
 			if err != nil {
 				initializeErrs[i] = fmt.Errorf("failed to resolve data sources for renderer '%s': %w", rendererSpec.Configs[i].Name, err)
@@ -437,6 +466,45 @@ func initializeRenderers(ctx context.Context, session Session, rendererSpec Rend
 	}
 
 	return initializeErrs, nil
+}
+
+func resolveRendererDependencyStatus(rendererSpec RendererSpec, rendererIndex int, dependencyErr func(dependencyIndex int) (bool, error)) error {
+	for _, dependency := range rendererSpec.Dependencies[rendererIndex].Renderers {
+		dependencyIndex := rendererIndexFromID(dependency.RendererID, rendererSpec.Configs)
+		if dependencyIndex == -1 {
+			// Just being defensive. Missing dependencies will have been detected when
+			// rendererSpec was created.
+			continue
+		}
+
+		done, rendererErr := dependencyErr(dependencyIndex)
+
+		if errors.Is(rendererErr, cdf.ErrComponentPending) {
+			return rendererErr
+		}
+
+		if rendererErr != nil {
+			return message.New(message.EngineRenderRendererspecRendererDependencyFailed).
+				WithMetadata(map[string]string{
+					"type":           rendererSpec.Configs[rendererIndex].Name,
+					"id":             rendererSpec.Configs[rendererIndex].GetDisplayID(),
+					"dependencyType": rendererSpec.Configs[dependencyIndex].Name,
+					"dependencyId":   rendererSpec.Configs[dependencyIndex].GetDisplayID(),
+				}).
+				WithCause(rendererErr)
+		}
+
+		if !done {
+			return message.New(message.EngineRenderRendererspecRendererDependencyNotInitialized).
+				WithMetadata(map[string]string{
+					"type":           rendererSpec.Configs[rendererIndex].Name,
+					"id":             rendererSpec.Configs[rendererIndex].GetDisplayID(),
+					"dependencyType": rendererSpec.Configs[dependencyIndex].Name,
+					"dependencyId":   rendererSpec.Configs[dependencyIndex].GetDisplayID(),
+				})
+		}
+	}
+	return nil
 }
 
 // RemoveTempTables drops all temp tables currently tracked by the session manifest.
@@ -571,11 +639,11 @@ func StartRenderSession(
 		return nil, nil, fmt.Errorf("starting session failed: failed to load content for new render: %w", err)
 	}
 
-	dataSources, configErrs, err := createDataSources(rendererConfigs)
+	dependencies, configErrs, err := createDependencies(rendererConfigs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating data sources failed: %w", err)
+		return nil, nil, fmt.Errorf("creating dependencies failed: %w", err)
 	}
-	rendererSpec, graphErrs, err := NewRendererSpec(rendererConfigs, dataSources)
+	rendererSpec, graphErrs, err := NewRendererSpec(rendererConfigs, dependencies)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating renderer graph failed: %w", err)
 	}

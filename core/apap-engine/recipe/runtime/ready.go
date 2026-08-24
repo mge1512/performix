@@ -48,6 +48,39 @@ func (c *ReadinessCollector) OnReadinessProbed(r recipe.ReadyOutput) {
 	c.ReadinessOutput = append(c.ReadinessOutput, r)
 }
 
+// CombinedOutput reduces the collected readiness outputs into one result.
+func (c *ReadinessCollector) CombinedOutput() recipe.ReadyOutput {
+	reducedAdvice := []recipe.ReadyAdvice{}
+
+	// unknown status is not returned right now by sl collect daemon, and there is no plan to make use of it.
+	// We use unknown as a fallback if the status does not match any other existing status.
+	severityRanking := map[string]int{
+		recipe.ReadyStatusUnknown: 3,
+		recipe.ReadyStatusError:   2,
+		recipe.ReadyStatusWarning: 1,
+		recipe.ReadyStatusReady:   0,
+	}
+
+	// Determine the highest severity rank
+	mostSevere := recipe.ReadyStatusReady
+	maxRank := severityRanking[mostSevere]
+	for _, output := range c.ReadinessOutput {
+		reducedAdvice = append(reducedAdvice, output.Advice...)
+		rank, exists := severityRanking[output.Status]
+		if exists && rank > maxRank {
+			mostSevere = output.Status
+			maxRank = rank
+		} else if !exists {
+			mostSevere = recipe.ReadyStatusUnknown
+			log.Warnf("Invalid ready status: %v. The overall ready status will be set to: unknown", output.Status)
+			break
+		}
+	}
+
+	reducedOutput := recipe.ReadyOutput{Status: mostSevere, Advice: reducedAdvice}
+	return reducedOutput
+}
+
 type TargetSupportCollector struct {
 	PlatformSupport deploymentsupport.PlatformSupport
 }
@@ -88,42 +121,8 @@ func CheckRecipeReady(context context.Context, config *StageConfiguration) (*rec
 		return nil, err
 	}
 
-	overallStatus := reduceReadyStatus(readinessCollector)
-	return overallStatus, nil
-}
-
-// reduceReadyStatus takes multiple ReadyOutput from a ReadinessCollector and assembles them into
-// a single ReadyOutput. The final status will be the most severe one.
-func reduceReadyStatus(notifier *ReadinessCollector) *recipe.ReadyOutput {
-	reducedAdvice := []recipe.ReadyAdvice{}
-
-	// unknown status is not returned right now by sl collect daemon, and there is no plan to make use of it.
-	// We use unknown as a fallback if the status does not match any other existing status.
-	severityRanking := map[string]int{
-		recipe.ReadyStatusUnknown: 3,
-		recipe.ReadyStatusError:   2,
-		recipe.ReadyStatusWarning: 1,
-		recipe.ReadyStatusReady:   0,
-	}
-
-	// Determine the highest severity rank
-	mostSevere := recipe.ReadyStatusReady
-	maxRank := severityRanking[mostSevere]
-	for _, output := range notifier.ReadinessOutput {
-		reducedAdvice = append(reducedAdvice, output.Advice...)
-		rank, exists := severityRanking[output.Status]
-		if exists && rank > maxRank {
-			mostSevere = output.Status
-			maxRank = rank
-		} else if !exists {
-			mostSevere = recipe.ReadyStatusUnknown
-			log.Warnf("Invalid ready status: %v. The overall ready status will be set to: unknown", output.Status)
-			break
-		}
-	}
-
-	reducedOutput := &recipe.ReadyOutput{Status: mostSevere, Advice: reducedAdvice}
-	return reducedOutput
+	overallStatus := readinessCollector.CombinedOutput()
+	return &overallStatus, nil
 }
 
 // ConfigureRecipeReadyStages is responsible for creating the Stage list for the "recipe ready" stages
@@ -143,6 +142,18 @@ func ConfigureRecipeReadyStages(config *StageConfiguration, scriptedReadyStages 
 	workloadOptionsStage := stages.NewWorkloadOptionsStage(config.Ctx.OrigWorkload, &config.Ctx.ResolvedWorkload, connectStage.TargetSessionSupplier, connectStage.CommandRunnerSupplier)
 	s = append(s, workloadOptionsStage)
 
+	toolBundleResolutionStage := stages.NewToolBundleResolutionStage(
+		config.PackageManager,
+		targetArchitectureStage.PlatformConfigurationSupplier,
+		&config.Ctx.ParamValues,
+		config.Recipe,
+	)
+	hostArchitectureStage := stages.NewHostArchitectureStage(
+		config.TargetSessions,
+		toolBundleResolutionStage.ToolBundlesSupplier,
+	)
+	s = append(s, toolBundleResolutionStage, hostArchitectureStage)
+
 	connectingToAgentStage := stages.NewConnectingToTargetAgentStage(
 		config.Ctx.Target,
 		connectStage.TargetSessionSupplier,
@@ -153,7 +164,16 @@ func ConfigureRecipeReadyStages(config *StageConfiguration, scriptedReadyStages 
 
 	targetLockStage := stages.NewTargetLockStage(agentSupplier, time.Second*3)
 	releaseTargetLockStage := stages.NewReleaseTargetLockStage(targetLockStage.Release)
-	s = append(s, connectingToAgentStage, targetLockStage, getTargetInfoStage)
+	connectingToHostAgentStage := stages.NewConnectingToHostAgentStage(
+		toolBundleResolutionStage.ToolBundlesSupplier,
+		targetArchitectureStage.PlatformConfigurationSupplier,
+		connectStage.TargetFilesystemSupplier,
+		connectStage.TargetSessionSupplier,
+		hostArchitectureStage.PlatformConfigurationSupplier,
+		hostArchitectureStage.TargetFilesystemSupplier,
+		hostArchitectureStage.TargetSessionSupplier,
+	)
+	s = append(s, connectingToAgentStage, targetLockStage, getTargetInfoStage, connectingToHostAgentStage)
 
 	// Add the scripted recipe ready stages
 	execCtx := config.NewRunExecutionContext(hostFs)

@@ -15,6 +15,8 @@ let tool_imix_version = '1.1.0';
 // Temporary fix until we support recipes defining whether they are custom or not
 let customRecipe = false;
 const { collectToolAdvice, toolStatusToRecipeStatus } = recipeUtils;
+const telemetrySpecificationUnavailableMessageCode =
+  'recipes.instruction_mix.TELEMETRY_SPECIFICATION_UNAVAILABLE';
 
 /**
  * @type {import("./docs/jsdocs").Recipe}
@@ -77,6 +79,16 @@ var recipe = {
       label: 'Collect .NET stacks',
       description:
         'Enable collection of .NET stack traces when profiling .NET workloads.',
+      config: {
+        type: 'checkbox',
+        defaultValue: false,
+      },
+    },
+    {
+      id: 'rich_data_capture',
+      required: false,
+      label: 'Collect rich data',
+      description: `Enables the collection of rich data from the target, which enables advanced filtering functionality after the run completes. This can significantly increase host storage usage and transfer time.`,
       config: {
         type: 'checkbox',
         defaultValue: false,
@@ -200,6 +212,23 @@ function generateIMixToolConfig(workload, params) {
 
 /**
  * @param {import("./docs/jsdocs").ReadyExecutionContext} context
+ * @param {import("./docs/jsdocs").RecipeReadyAdvice[]} advice
+ */
+function addTelemetrySpecificationWarning(context, advice) {
+  const cpuName = context.targetInfo().PrimaryCPUName;
+  if (!context.getTelemetrySpecification(cpuName)) {
+    advice.push({
+      ToolName: '',
+      AdviceSeverity: 'warning',
+      MessageCode: telemetrySpecificationUnavailableMessageCode,
+      Metadata: { cpuName },
+      Cause: '',
+    });
+  }
+}
+
+/**
+ * @param {import("./docs/jsdocs").ReadyExecutionContext} context
  */
 function readyInstructionMix(context) {
   let mode = context.getParameter('mode');
@@ -219,6 +248,7 @@ function readyInstructionMix(context) {
       get_ipc_metric_name: true,
       collect_java_stacks: context.getParameter('collect_java_stacks'),
       collect_dotnet_stacks: context.getParameter('collect_dotnet_stacks'),
+      rich_data_capture: context.getParameter('rich_data_capture'),
     };
 
     tools.toolConfigs.push(generateNeoprofToolConfig(workload, params));
@@ -236,6 +266,9 @@ function readyInstructionMix(context) {
   let toolResponses = context.probeTools(tools);
 
   let allAdvice = collectToolAdvice(tools, toolResponses);
+  if (runDynamic) {
+    addTelemetrySpecificationWarning(context, allAdvice);
+  }
 
   return {
     status: toolStatusToRecipeStatus(allAdvice),
@@ -295,6 +328,7 @@ function runInstructionMix(context) {
       get_ipc_metric_name: true,
       collect_java_stacks: context.getParameter('collect_java_stacks'),
       collect_dotnet_stacks: context.getParameter('collect_dotnet_stacks'),
+      rich_data_capture: context.getParameter('rich_data_capture'),
     };
     tools.toolConfigs.push(generateNeoprofToolConfig(workload, params));
   }
@@ -353,6 +387,88 @@ const timeRangeFilter = {
   },
 };
 
+const processFilter = {
+  id: 'process',
+  type: 'process_filter',
+  title: 'Processes',
+  rendererId: 'processes_and_threads',
+  description: 'Include data from a selected process.',
+  parameterBindings: {
+    pid: 'filter_pid',
+    // changing pid should clear tid
+    tid: 'filter_tid',
+  },
+  config: {
+    data_source: {
+      tables: {
+        processes: [
+          { renderer_id: 'processes_and_threads', output: 'processes' },
+        ],
+      },
+    },
+    optionsQuery: {
+      dataSource: 'processes',
+      query:
+        'SELECT CAST(pid AS INTEGER) AS pid, name FROM __table__ ORDER BY pid',
+      tableNamePlaceholder: '__table__',
+    },
+  },
+};
+
+const threadFilter = {
+  id: 'thread',
+  type: 'thread_filter',
+  title: 'Threads',
+  rendererId: 'processes_and_threads',
+  description: 'Include data from a selected thread.',
+  parameterBindings: {
+    // the process selected by `processFilter` is an input to thread filtering
+    // as only a thread from that process can be selected
+    pid: 'filter_pid',
+    tid: 'filter_tid',
+  },
+  config: {
+    data_source: {
+      tables: {
+        threads: [{ renderer_id: 'processes_and_threads', output: 'threads' }],
+      },
+    },
+    optionsQuery: {
+      dataSource: 'threads',
+      query:
+        'SELECT CAST(pid AS INTEGER) AS pid, CAST(tid AS INTEGER) AS tid, name FROM __table__ ORDER BY pid, tid',
+      tableNamePlaceholder: '__table__',
+    },
+  },
+};
+
+function enableFilterIfAvailable(filter, runDescription) {
+  // Treat a missing parameter as disabled; only an explicit true enables time-range filtering.
+  const richDataCaptureEnabled =
+    runDescription.Parameters.rich_data_capture === true;
+
+  if (!richDataCaptureEnabled) {
+    return {
+      ...filter,
+      disabled: {
+        reason:
+          'Global filtering is unavailable for this run. re-run the Recipe with "Collect rich data" enabled.',
+      },
+    };
+  }
+  if (!runDescription.IsRunPhaseTwoComplete) {
+    return {
+      ...filter,
+      disabled: {
+        reason: runDescription.IsRunInProgress
+          ? 'Unavailable until all capture data has been retrieved from the target.'
+          : 'Unavailable because the run ended before all capture data was retrieved from the target.',
+      },
+    };
+  }
+  return filter;
+}
+
 /**
  * @param {import("./docs/jsdocs").RenderExecutionContext} context
  */
@@ -369,10 +485,8 @@ function renderInstructionMix(context) {
     context,
     'filter_end_time_ns',
   );
-  const timeRangeNoDataMessage =
-    filterStartTimeNs !== null || filterEndTimeNs !== null
-      ? 'No samples match the selected time range. Try widening or clearing the time range filter.'
-      : null;
+
+  let noDataMessageConfig = {};
 
   const fallbackMode = 'dynamic';
 
@@ -395,7 +509,7 @@ function renderInstructionMix(context) {
   let renderStatic = mode === 'static' || mode === 'both';
   let renderers = [];
   let visualizations = [];
-  const topBarFilters = [];
+  const filters = [];
 
   const dataSourceSingle = {
     tables: {
@@ -527,6 +641,14 @@ function renderInstructionMix(context) {
   const dataSource = isComparison ? dataSourceComparison : dataSourceSingle;
   const sourceFiles = isComparison ? sourceFilesComparison : sourceFilesSingle;
   const disassembly = isComparison ? disassemblyComparison : disassemblySingle;
+  const slAnalyzeRerenderDependency = [{ renderer_id: 'sl_analyze' }];
+  let isSlAnalyzeRerendering = false;
+
+  function withSlAnalyzeRerenderDependency(dataSource) {
+    return isSlAnalyzeRerendering
+      ? { ...dataSource, renderers: slAnalyzeRerenderDependency }
+      : dataSource;
+  }
 
   const dataSourceCompareDrilldownStacks = {
     tables: {
@@ -597,26 +719,38 @@ function renderInstructionMix(context) {
   if (renderDynamic) {
     if (context.isRerenderingEnabled() && !isComparison) {
       const slAnalyzeConfig = { entity: `tool/${tool_neoprof_name}/0/` };
-      if (filterPid !== null && Number.isFinite(filterPid) && filterPid > 0) {
-        slAnalyzeConfig.filter_pid = filterPid;
-      }
-      if (filterTid !== null && Number.isFinite(filterTid) && filterTid > 0) {
+      let isFiltering = false;
+      if (filterTid !== null && Number.isFinite(filterTid)) {
         slAnalyzeConfig.filter_tid = filterTid;
+        isFiltering = true;
+      } else if (filterPid !== null && Number.isFinite(filterPid)) {
+        slAnalyzeConfig.filter_pid = filterPid;
+        isFiltering = true;
       }
       if (
         filterStartTimeNs !== null &&
         Number.isFinite(filterStartTimeNs) &&
         filterStartTimeNs >= 0
       ) {
-        slAnalyzeConfig.filter_start_time_ns = filterStartTimeNs;
+        slAnalyzeConfig.filter_start_time_ns = Math.round(filterStartTimeNs);
+        isFiltering = true;
       }
       if (
         filterEndTimeNs !== null &&
         Number.isFinite(filterEndTimeNs) &&
         filterEndTimeNs >= 0
       ) {
-        slAnalyzeConfig.filter_end_time_ns = filterEndTimeNs;
+        slAnalyzeConfig.filter_end_time_ns = Math.round(filterEndTimeNs);
+        isFiltering = true;
       }
+
+      if (isFiltering) {
+        noDataMessageConfig = {
+          noDataMessage:
+            'No samples match the selected filter values. Try loosening or clearing filters.',
+        };
+      }
+
       renderers.push(
         {
           type: 'SlAnalyzeRenderer',
@@ -634,21 +768,21 @@ function renderInstructionMix(context) {
           config: { entity: `tool/${tool_neoprof_name}/0/` },
         },
       );
-      if (!context.getRunDescriptions()[0].IsRunPhaseTwoComplete) {
-        timeRangeFilter.disabled = {
-          reason: context.getRunDescriptions()[0].IsRunInProgress
-            ? 'Unavailable until all capture data has been retrieved from the target.'
-            : 'Unavailable because the run ended before all capture data was retrieved from the target.',
-        };
-      }
-      topBarFilters.push(timeRangeFilter);
+      isSlAnalyzeRerendering = true;
+      const runDescription = context.getRunDescriptions()[0];
+      filters.push(enableFilterIfAvailable(timeRangeFilter, runDescription));
+      filters.push(enableFilterIfAvailable(processFilter, runDescription));
+      filters.push(enableFilterIfAvailable(threadFilter, runDescription));
     }
 
     renderers.push(
       {
         type: 'StreamlineAnalyzeSymbols',
         id: 'streamline_symbols',
-        config: { config: { entity: `tool/${tool_neoprof_name}/0/` } },
+        config: {
+          config: { entity: `tool/${tool_neoprof_name}/0/` },
+          data_source: withSlAnalyzeRerenderDependency({}),
+        },
       },
 
       { type: 'TargetInfoRenderer', id: 'target_info' },
@@ -656,7 +790,7 @@ function renderInstructionMix(context) {
         type: 'StreamlineAnalyzeFlatFunctions2',
         id: 'flat',
         config: {
-          data_source: dataSource,
+          data_source: withSlAnalyzeRerenderDependency(dataSource),
           entity: `tool/${tool_neoprof_name}/0/`,
         },
       },
@@ -664,7 +798,7 @@ function renderInstructionMix(context) {
         type: 'StreamlineAnalyzeFunctionProfileRenderer2',
         id: 'drilldown',
         config: {
-          data_source: dataSource,
+          data_source: withSlAnalyzeRerenderDependency(dataSource),
           entity: `tool/${tool_neoprof_name}/0/`,
         },
       },
@@ -672,7 +806,7 @@ function renderInstructionMix(context) {
         type: 'SourceCodeAttribution',
         id: 'source_code_attribution',
         config: {
-          data_source: sourceFiles,
+          data_source: withSlAnalyzeRerenderDependency(sourceFiles),
           entity: `tool/${tool_neoprof_name}/0/`,
         },
       },
@@ -681,7 +815,7 @@ function renderInstructionMix(context) {
         id: 'disassembly',
         config: {
           entity: `tool/${tool_neoprof_name}/0/`,
-          data_source: disassembly,
+          data_source: withSlAnalyzeRerenderDependency(disassembly),
         },
       },
     );
@@ -733,9 +867,7 @@ function renderInstructionMix(context) {
             description:
               'View the proportion of executed instructions in each category. Note that the percentages across categories might not sum to 100% because the values are derived from sampled and categorized data.',
             config: {
-              ...(timeRangeNoDataMessage
-                ? { noDataMessage: timeRangeNoDataMessage }
-                : {}),
+              ...noDataMessageConfig,
               data_source: {
                 tables: {
                   drilldown: [
@@ -830,9 +962,7 @@ function renderInstructionMix(context) {
             description:
               'View the CPU time and the proportion of instruction categories used for each function.',
             config: {
-              ...(timeRangeNoDataMessage
-                ? { noDataMessage: timeRangeNoDataMessage }
-                : {}),
+              ...noDataMessageConfig,
               data_source: {
                 tables: {
                   flatFunctions: [{ renderer_id: 'flat', output: 'drilldown' }],
@@ -974,14 +1104,11 @@ function renderInstructionMix(context) {
     );
   }
 
-  if (topBarFilters.length > 0) {
-    return {
-      renderers,
-      ui: {
-        visualizations,
-        top_bar_filters: topBarFilters,
-      },
-    };
-  }
-  return { renderers, visualizations };
+  return {
+    renderers,
+    ui: {
+      visualizations,
+      side_panel_filters: filters,
+    },
+  };
 }

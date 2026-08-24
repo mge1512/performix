@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright 2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pytorch_collect*"]
+
+[project]
+name = "pytorch-collect"
+version = "0.1.0"
+description = "Trace and collect PyTorch operators and dispatchers."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+classifiers = ["Programming Language :: Python :: 3"]
+dependencies = ["torch", "pyarrow"]
+
+[project.optional-dependencies]
+samples = ["torch", "transformers"]
+
+[project.scripts]
+pytorch-collect = "pytorch_collect.cli:main"

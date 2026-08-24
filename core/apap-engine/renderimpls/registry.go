@@ -23,6 +23,7 @@ func NewRegistry() *RendererRegistry {
 		"CompareDrilldownFlat":                      func() render.Renderer { return &CompareDrilldownFlat{} },
 		"CompareDrilldownCallStacks":                func() render.Renderer { return &CompareDrilldownCallStacks{} },
 		"TargetInfoRenderer":                        func() render.Renderer { return &TargetInfoRenderer{} },
+		"SupportedCoreTypes":                        func() render.Renderer { return &SupportedCoreTypes{} },
 		"StreamlineAnalyzeFlatFunctions":            func() render.Renderer { return &StreamlineAnalyzeFlatFunctionProfileRenderer{} },
 		"StreamlineAnalyzeFlatFunctions2":           func() render.Renderer { return &StreamlineAnalyzeFlatFunctionProfileRenderer2{} },
 		"CSV":                                       func() render.Renderer { return &CSVRenderer{} },

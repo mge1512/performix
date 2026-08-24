@@ -154,7 +154,7 @@ AGENTS.override.md
 
 .codex
 
-# Ignore any local open-sourcing worktrees created by 'task release'
+# Ignore any local open-sourcing worktrees created by 'task open-source'
 .release-worktrees/
 
 # Don't check in auto-generated Go code

@@ -30,6 +30,7 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/target"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool/deployer"
+	"github.com/Arm-Debug/apap-cli/apap-engine/util"
 )
 
 func newRunCollectionWithLogHook(t *testing.T) (*log.Logger, *logging.DeferredFileOpenLogHook, *run.RunCollection, *run.RunID) {
@@ -420,6 +421,14 @@ func TestBuildStages_ValidatePIDStageInclusion(t *testing.T) {
 		}
 		return false
 	}
+	hasPIDCollection := func(ss []recipe.Stage) bool {
+		for _, st := range ss {
+			if _, ok := st.(*stages.CollectTargetPIDStage); ok {
+				return true
+			}
+		}
+		return false
+	}
 
 	t.Run("attach with non-zero PID includes ValidateTargetPIDStage", func(t *testing.T) {
 		cfg := newCfg(&tool.WorkloadAttach{PID: 4321})
@@ -448,6 +457,20 @@ func TestBuildStages_ValidatePIDStageInclusion(t *testing.T) {
 		ss, _ = factory.BuildStages(cfg, nil)
 		assert.False(t, hasValidate(ss))
 	})
+
+	t.Run("Android workloads defer process support to the collector", func(t *testing.T) {
+		cfg := newCfg(&tool.WorkloadLaunch{Command: []string{"com.example/com.example.MainActivity"}})
+		cfg.Ctx.Target = &target.AndroidTarget{SerialNumber: "device-123"}
+		ss, _ := factory.BuildStages(cfg, nil)
+		assert.True(t, hasPIDCollection(ss))
+		assert.False(t, hasValidate(ss))
+
+		cfg = newCfg(&tool.WorkloadAttach{PID: 4321})
+		cfg.Ctx.Target = &target.AndroidTarget{SerialNumber: "device-123"}
+		ss, _ = factory.BuildStages(cfg, nil)
+		assert.True(t, hasPIDCollection(ss))
+		assert.True(t, hasValidate(ss))
+	})
 }
 
 func TestBuildStages(t *testing.T) {
@@ -475,18 +498,48 @@ func TestBuildStages(t *testing.T) {
 	})
 
 	t.Run("includes transfer manager stages if feature flag is enabled", func(t *testing.T) {
+		phase1CallbackCalled := false
 		cfg := &StageConfiguration{
 			Ctx:                    &recipe.RecipeCtx{},
 			Recipe:                 &recipe.Recipe{},
 			TransferManagerEnabled: true,
 			CollectionState:        &recipe.CollectionState{},
+			OnPhase1TransferComplete: func(bool) {
+				phase1CallbackCalled = true
+			},
 		}
 		ss, _ := factory.BuildStages(cfg, nil)
 		startStage, ok := ss[len(ss)-3].(*stages.StartTransferManagerStage)
-		assert.True(t, ok)
+		require.True(t, ok)
 		assert.NotNil(t, startStage.TransferManager)
-		_, ok = ss[len(ss)-1].(*stages.WaitForTransfersStage)
-		assert.True(t, ok)
+		waitStage, ok := ss[len(ss)-1].(*stages.WaitForTransfersStage)
+		require.True(t, ok)
+
+		runCollection, err := run.NewRunCollection(t.TempDir())
+		require.NoError(t, err)
+		builder, err := runCollection.RunBuilder()
+		require.NoError(t, err)
+		builder.AddEntity("test")
+		runID, err := runCollection.CreateRun(builder, &cdf.Metadata{
+			RunResult: string(run.RecipeInProgress),
+			EndTime:   util.InvalidTime(),
+		})
+		require.NoError(t, err)
+
+		stageCtx := &recipe.StageContext{
+			Context: context.Background(),
+			CommandStateChannel: &cmdsync.CommandStateChannel{
+				CancelChan: make(chan struct{}),
+			},
+			RunID:         runID,
+			RunCollection: runCollection,
+			StageNotifier: &recipe.NullStageNotifier{},
+		}
+		_, err = startStage.Execute(stageCtx)
+		require.NoError(t, err)
+		_, err = waitStage.Execute(stageCtx)
+		require.NoError(t, err)
+		assert.True(t, phase1CallbackCalled)
 	})
 }
 

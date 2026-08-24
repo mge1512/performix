@@ -49,6 +49,11 @@ func (m *MockRecipeAPI) listRunComponents(call goja.FunctionCall) goja.Value {
 	return arg.Get(0).(goja.Value)
 }
 
+func (m *MockRecipeAPI) getToolCapabilities(call goja.FunctionCall) goja.Value {
+	arg := m.Called(call)
+	return arg.Get(0).(goja.Value)
+}
+
 func (m *MockRecipeAPI) getParameter(call goja.FunctionCall) goja.Value {
 	arg := m.Called(call)
 	return arg.Get(0).(goja.Value)
@@ -60,6 +65,11 @@ func (m *MockRecipeAPI) getRenderParameter(call goja.FunctionCall) goja.Value {
 }
 
 func (m *MockRecipeAPI) getRenderParameters(call goja.FunctionCall) goja.Value {
+	arg := m.Called(call)
+	return arg.Get(0).(goja.Value)
+}
+
+func (m *MockRecipeAPI) setDefaultRenderParameter(call goja.FunctionCall) goja.Value {
 	arg := m.Called(call)
 	return arg.Get(0).(goja.Value)
 }
@@ -95,6 +105,16 @@ func (m *MockRecipeAPI) writeUserMessage(call goja.FunctionCall) goja.Value {
 }
 
 func (m *MockRecipeAPI) targetInfo(call goja.FunctionCall) goja.Value {
+	arg := m.Called(call)
+	return arg.Get(0).(goja.Value)
+}
+
+func (m *MockRecipeAPI) getPrimaryCPUName(call goja.FunctionCall) goja.Value {
+	arg := m.Called(call)
+	return arg.Get(0).(goja.Value)
+}
+
+func (m *MockRecipeAPI) getFirstSupportedCPUName(call goja.FunctionCall) goja.Value {
 	arg := m.Called(call)
 	return arg.Get(0).(goja.Value)
 }
@@ -433,28 +453,6 @@ const recipe = {
 		require.Len(t, recipeProp.Deployments, 1)
 		require.Len(t, recipeProp.Deployments[0].Dependencies, 1)
 		assert.Equal(t, versions.GetVersion(), recipeProp.Deployments[0].Dependencies[0].Version)
-	})
-
-	t.Run("Recipe status parsing rejects invalid explicit status", func(t *testing.T) {
-		tests := []struct {
-			name        string
-			properties  Recipe
-			expectedErr string
-		}{
-			{
-				name:        "invalid explicit status",
-				properties:  Recipe{Status: "beta"},
-				expectedErr: `invalid recipe status "beta"`,
-			},
-		}
-
-		for _, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				actual, err := parseRecipeStatus(test.properties)
-				require.EqualError(t, err, test.expectedErr)
-				assert.Empty(t, actual)
-			})
-		}
 	})
 
 	t.Run("Recipe is parsed correctly and panics", func(t *testing.T) {
@@ -950,7 +948,7 @@ func TestRenderStages(t *testing.T) {
 		renderStageJS := `
 			function renderCPUMicroarchitecture(apap) {
 				const csvFiles = apap
-					.listRunComponents(0, "tool/example_tool/0/output")
+					.listRunComponents(0, "tool/example_tool/0/output/**")
 					.filter((component) => component.componentType.name === "example-csv-data")
 
 				return {
@@ -980,6 +978,10 @@ func TestRenderStages(t *testing.T) {
 				ComponentType: cdf.ComponentType{Name: "example-csv-data", SchemaVersion: "1.0"},
 			},
 			{
+				Path:          "tool/example_tool/0/output/nested/metrics_0500.csv",
+				ComponentType: cdf.ComponentType{Name: "example-csv-data", SchemaVersion: "1.0"},
+			},
+			{
 				Path:          "tool/example_tool/0/output/readme.txt",
 				ComponentType: cdf.ComponentType{Name: "log-text", SchemaVersion: "1.0"},
 			},
@@ -1003,7 +1005,7 @@ func TestRenderStages(t *testing.T) {
 		_, err = recipeStage.Execute(stageContext)
 		require.NoError(t, err)
 
-		require.Len(t, renderNotifier.Output.Renderers, 2)
+		require.Len(t, renderNotifier.Output.Renderers, 3)
 		assert.Equal(t, recipe.RendererConfig{
 			Type: "CSV",
 			ID:   "example_csv_0",
@@ -1018,16 +1020,23 @@ func TestRenderStages(t *testing.T) {
 				"component": "tool/example_tool/0/output/metrics_2000.csv",
 			},
 		}, renderNotifier.Output.Renderers[1])
+		assert.Equal(t, recipe.RendererConfig{
+			Type: "CSV",
+			ID:   "example_csv_2",
+			Config: map[string]interface{}{
+				"component": "tool/example_tool/0/output/nested/metrics_0500.csv",
+			},
+		}, renderNotifier.Output.Renderers[2])
 		assert.Empty(t, renderNotifier.Output.Widgets)
 	})
 
-	t.Run("Render stage fails when listRunComponents entity is missing", func(t *testing.T) {
+	t.Run("Render stage allows listRunComponents when entity is missing", func(t *testing.T) {
 		renderNotifier := &runtime.RendererStageCollector{}
 		stageContext := &recipe.StageContext{RendererNotifier: renderNotifier}
 
 		renderStageJS := `
 			function renderCPUMicroarchitecture(apap) {
-				apap.listRunComponents(0, "tool/example_tool/0/output")
+				apap.listRunComponents(0, "tool/example_tool/0/output/**")
 
 				return {
 					renderers: [],
@@ -1051,13 +1060,8 @@ func TestRenderStages(t *testing.T) {
 		}
 
 		_, err = recipeStage.Execute(stageContext)
-		require.Error(t, err)
+		require.NoError(t, err)
 
-		var msgErr message.Message
-		require.ErrorAs(t, err, &msgErr)
-		assert.Equal(t, message.EngineRecipeStagesScriptedStageError, msgErr.Code())
-		assert.Equal(t, "Create Render", msgErr.Metadata()["stage"])
-		assert.ErrorContains(t, err, "failed to list components in entity 'tool/example_tool/0/output'")
 		assert.Empty(t, renderNotifier.Output.Renderers)
 		assert.Empty(t, renderNotifier.Output.Widgets)
 	})

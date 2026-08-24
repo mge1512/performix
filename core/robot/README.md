@@ -65,7 +65,7 @@ task core:test:robot TARGET=my_device ROBOT_ARGS="--exclude-tags cpu_microarchit
 task core:test:robot TARGET=my_device ROBOT_ARGS="--exclude-tags cpu_microarchitecture --exclude-tags instruction_mix"
 ```
 
-Tests tagged `remote_localhost` will be skipped by default, because they require the CLI to be built and deployed on the remote target first and this takes a little extra time to set up. Pass `--run-remote-localhost` to enable automatic remote localhost setup and include those tests:
+Tests tagged `remote-localhost` will be skipped by default, because they require the CLI to be built and deployed on the remote target first and this takes a little extra time to set up. Pass `--run-remote-localhost` to enable automatic remote localhost setup and include those tests:
 
 ```shell
 task core:test:robot TARGET=my_device ROBOT_ARGS="--run-remote-localhost --launch-workload /path/to/workload"
@@ -80,7 +80,7 @@ Run from the `apap-cli` directory. `TARGET` is mandatory and must match the name
 make robot-test TARGET=my_device
 ```
 
-To exclude specific tags or enable `remote_localhost` tests, use `ROBOT_ARGS` in the same way as shown above for `task core:test:robot`:
+To exclude specific tags or enable `remote-localhost` tests, use `ROBOT_ARGS` in the same way as shown above for `task core:test:robot`:
 
 ```shell
 make robot-test TARGET=my_device ROBOT_ARGS="--exclude-tags cpu_microarchitecture"
@@ -109,7 +109,7 @@ The target is passed as a Robot variable:
 robot -T --outputdir robot/results --exclude disabled --variable TARGET:<name> robot/tests
 ```
 
-Note that `remote_localhost`-tagged tests will be skipped automatically if the remote localhost setup has not been performed (i.e. `apx` is not present on the target at `/tmp/apx-remote-localhost/repo/apap-cli/apx`). Use `task core:test:robot` or `make robot-test` with `--run-remote-localhost` to perform that setup.
+Note that `remote-localhost`-tagged tests will be skipped automatically if the remote localhost setup has not been performed (i.e. `apx` is not present on the target at `/tmp/apx-remote-localhost/repo/core/apap-cli/apx`). Use `task core:test:robot` or `make robot-test` with `--run-remote-localhost` to perform that setup.
 
 #### Example commands
 
@@ -119,7 +119,7 @@ Note that `remote_localhost`-tagged tests will be skipped automatically if the r
 | x86-64 target (exclude unsupported recipes) | `robot -T --outputdir robot/results --exclude disabledORcpu_microarchitectureORinstruction_mixORmemory_access --variable TARGET:<name> robot/tests` |
 | Only run recipe tests | `robot -T --outputdir robot/results --include recipe --exclude disabled --variable TARGET:<name> robot/tests` |
 | Only run target and run tests | `robot -T --outputdir robot/results --include targetORrun --exclude disabled --variable TARGET:<name> robot/tests` |
-| Skip `remote_localhost` tests (note: `remote_localhost` tests require special setup on the target before they are run, this can be handled `./scripts/run-robot.py` with the `--run-remote-localhost` flag) | `robot -T --outputdir robot/results --exclude disabledORremote_localhost --variable TARGET:<name> robot/tests` |
+| Skip `remote-localhost` tests (note: `remote-localhost` tests require special setup on the target before they are run, this can be handled `./scripts/run-robot.py` with the `--run-remote-localhost` flag) | `robot -T --outputdir robot/results --exclude disabledORremote-localhost --variable TARGET:<name> robot/tests` |
 | Dry run a single suite (no execution) | `robot --dryrun --output NONE --log NONE --report NONE robot/tests/recipe/recipe.robot` |
 | Run without producing output files | `robot --output NONE --log NONE --report NONE --variable TARGET:<name> robot/tests` |
 

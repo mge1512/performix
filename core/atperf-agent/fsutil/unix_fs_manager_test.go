@@ -568,6 +568,30 @@ func TestUnixFSManager_ListFiles(t *testing.T) {
 		}
 	})
 
+	t.Run("does not enumerate the parent directory for an exact path", func(t *testing.T) {
+		tmp := t.TempDir()
+		fp := filepath.Join(tmp, "one.txt")
+		require.NoError(t, os.WriteFile(fp, []byte("hello\n"), 0o600))
+
+		// Searching a directory only requires execute permission, while globbing
+		// requires read permission to enumerate its entries. Android can expose
+		// system image files with this access pattern.
+		require.NoError(t, os.Chmod(tmp, 0o300))
+		defer func() {
+			require.NoError(t, os.Chmod(tmp, 0o700))
+		}()
+
+		if _, err := os.ReadDir(tmp); err == nil {
+			t.Skip("current user can enumerate a directory without read permission")
+		}
+
+		infos := mgr.ListFiles(fp)
+		require.Len(t, infos, 1)
+		require.NoError(t, infos[0].Error)
+		assert.Equal(t, fp, infos[0].Path)
+		assert.EqualValues(t, len("hello\n"), infos[0].Size)
+	})
+
 	t.Run("returns correct name and file list for multiple files incl. subdirs", func(t *testing.T) {
 		tmp := t.TempDir()
 

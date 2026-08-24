@@ -41,6 +41,7 @@ import (
 
 func newTestServer(t *testing.T) (GrpcServer, *bufconn.Listener, *bufconn.Listener, context.CancelFunc) {
 	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	apapListener, _ := apapenginemocks.GetBufferDialerFunc()
 	authListener, _ := apapenginemocks.GetBufferDialerFunc()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -106,7 +107,10 @@ func TestRunBlocking(t *testing.T) {
 
 		pidfile, err := pidfiles.ConstructPidFilePath(grpcServer.Config.Host, grpcServer.Config.Port)
 		assert.NoError(t, err)
-		assert.FileExists(t, pidfile)
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(pidfile)
+			return err == nil
+		}, 5*time.Second, 100*time.Millisecond)
 
 		cancel()
 		waitGroup.Wait()
@@ -379,6 +383,7 @@ func TestCacheInitialisation(t *testing.T) {
 }
 
 func TestNonBlocking(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var serverCancels []context.CancelFunc
 	t.Cleanup(func() {
 		for _, cancel := range serverCancels {

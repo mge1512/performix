@@ -6,16 +6,16 @@ path = [
     # headers. `task copyright:annotate` will not annotate these files with
     # our standard SPDX header file. Prefer inline SPDX headers for new files
     # where practical. If a new file cannot carry a header, use a `.license`
-    # sidecar file for one-offs or add a narrow path here when shared
-    # `REUSE.toml` coverage is appropriate.
-    ".github/PULL_REQUEST_TEMPLATE.md",
-    ".secrets.baseline",
+    # sidecar file instead. Only use this `REUSE.toml` shared annotation for
+    # special cases, such as generated files, where a .license file isn't
+    # appropriate.
     "core/apap-cli/tools-builtin/sysutil-timeline/tests/fixtures/**",
     "core/apap-engine/regressiontests/test-data/**",
     "core/clients/go/**/*.pb.go",
     "core/clients/go/**/*_grpc.pb.go",
     "core/robot/stdout.txt",
     "core/scripts/tpip/tools-metadata.json",
+    "mise.internal.lock",
     "mise.lock",
 ]
 precedence = "closest"

@@ -27,7 +27,7 @@ func TestNewRunSummary(t *testing.T) {
 }
 
 func TestSummarizersByRecipe(t *testing.T) {
-	for recipeName, summarizers := range summarizersByRecipe {
+	for recipeName, summarizers := range additionalSummarizersByRecipe {
 		t.Run(recipeName, func(t *testing.T) {
 			for _, summarizer := range summarizers.Unbudgeted {
 				assert.NotEmpty(t, summarizer.Name)
@@ -44,23 +44,13 @@ func TestSummarizersByRecipe(t *testing.T) {
 }
 
 func TestSummarizersForRecipe(t *testing.T) {
-	t.Run("returns success for supported recipe", func(t *testing.T) {
-		_, err := SummarizersForRecipe("code_hotspots")
+	for _, recipeName := range []string{"system_utilization", "unknown_recipe"} {
+		t.Run(recipeName, func(t *testing.T) {
+			summarizers := SummarizersForRecipe(recipeName)
 
-		require.NoError(t, err)
-	})
-
-	t.Run("returns catalog error for unsupported recipe", func(t *testing.T) {
-		_, err := SummarizersForRecipe("unknown_recipe")
-
-		require.Error(t, err)
-		msg, ok := err.(*message.MessageImpl)
-		require.True(t, ok)
-		assert.Equal(t, message.EngineInsightsUnsupportedRecipe, msg.Code())
-		assert.Equal(t, map[string]string{
-			"unsupportedRecipe":    "unknown_recipe",
-			"supportedRecipesList": "code_hotspots",
-		}, msg.Metadata())
-		assert.NoError(t, message.ValidateMetadataPlaceholders(err))
-	})
+			require.Len(t, summarizers.Unbudgeted, 1)
+			assert.Equal(t, RunDetailsSummarizer.Name, summarizers.Unbudgeted[0].Name)
+			assert.Empty(t, summarizers.Budgeted)
+		})
+	}
 }

@@ -228,10 +228,21 @@
  * @typedef {Object} RenderExecutionContext
  * @property {string} engineVersion
  * @property {function(): RunDescription[]} getRunDescriptions - Provides general metadata associated with the runs to render.
+ * @property {function(number): string} getPrimaryCpuName
+ * Returns the primary CPU name for the run at the given zero-based index. The index uses the same ordering as getRunDescriptions().
+ * @property {function(number): (string|undefined)} getFirstSupportedCpuName
+ * Returns the CPU name with embedded telemetry support on the lowest-numbered core, or undefined when none of the run's CPUs are supported.
+ * The primary CPU is returned whenever it is supported. The index uses the same ordering as getRunDescriptions().
  * @property {function(number, string): RunComponentDescription[]} listRunComponents
- * Lists manifest components for an indexed run under the given entity path.
+ * Lists manifest components for an indexed run matching the given component glob.
+ * @property {function(runIndex:number, toolInvocation:ToolInvocation): ToolCapabilities} getToolCapabilities
+ * Lists the registered capabilities for the specified tool invocation of the indexed run.
  * @property {function(string): any} getRenderParameter - Retrieves a render parameter by ID.
  * @property {function(): Object.<string, any>} getRenderParameters - Retrieves all render parameters by ID.
+ * @property {function(string, any): void} setDefaultRenderParameter
+ * Sets the effective value of a declared render parameter only when it is currently null or unset.
+ * An explicit request or mapped visualization value is never replaced. Passing null or undefined is a no-op.
+ * A value set here is immediately visible through getRenderParameter and getRenderParameters in the same render execution.
  * @property {function(string): void} logWarn
  * @property {function(string): void} logInfo
  * @property {function(): boolean} isRerenderingEnabled
@@ -246,6 +257,30 @@
  * @property {string} relativePath - Relative path to the component within the run directory.
  * @property {string} fileName - Base file name for the component.
  * @property {{name: string, version: string}} componentType - Component type metadata.
+ */
+
+/**
+ * @typedef {Object} ToolInvocation
+ * @property {string} toolName - The name of the tool.
+ * @property {number} invocationIndex - The index of the tool invocation.
+ * @description - Defines a particular invocation of a tool.
+ */
+
+/**
+ * @typedef {Object} ToolCapabilities
+ * @property {function(capabilityId:string, state?:string): boolean} has - Returns true if this tool invocation has the requested capability ID (and optional state)
+ * @property {function(capabilityId:string, componentType?:ComponentType): ToolCapability|null} get - Returns the capability with the requested ID, if this tool invocation registered this capability.
+ *           Errors if an expected component type was specified, and the capability found does not have this component type
+ * @property {function(): Object.<string, ToolCapability>} list - Returns a list of all capabilities of this tool invocation, keyed by capability ID.
+ * @description - Stores the capabilities of a particular tool invocation.
+ */
+
+/**
+ * @typedef {Object} ToolCapability
+ * @property {string} state - the state of this capability
+ * @property {Object.<string, any>} payload - arbitrary payload data associated with this capability
+ * @property {ComponentType} componentType - the component name and version of this capability
+ * @description - Describes a capability of a particular tool invocation.
  */
 
 /**
@@ -331,8 +366,8 @@
  * @property {string} ToolName
  * @property {string} AdviceSeverity
  * @property {string} MessageCode - the code of the catalog message to look up
- * @property {Object.<string, string>} Metadata - (optional) any metadata to attach to the Message
- * @property {string} Cause - (optional) a string to attach as a cause
+ * @property {Object.<string, string>} [Metadata] - optional metadata to attach to the Message
+ * @property {string} [Cause] - an optional string to attach as a cause
  */
 
 /**
@@ -550,7 +585,7 @@
 /**
  * Metadata when emitting an output artifact from a tool.
  * @typedef {Object} OutputMetadata
- * @property {string} componentType
+ * @property {string} name
  * @property {string} version
  */
 
@@ -568,18 +603,27 @@
  * Unless otherwise noted, methods reject their Promise on failure.
  * @typedef {Object} Engine
  *
- * @property {(cmd:(string|string[]), opts?:ExecOptions) => Promise<CommandResult>} execCommand
+ * @property {(cmd:string[], opts?:ExecOptions) => Promise<CommandResult>} execCommand
  * Run a command and resolve with its full output.
  * - `cmd` defines the program to launch along with its arguments.
+ * - If the program cannot be found through `PATH`, resolves with exit code 127.
  *
- * @property {(cmd:(string|string[]), opts:ProcessOptions) => Promise<ProcessHandle>} startProcess
+ * @property {(cmd:string[], opts:ProcessOptions) => Promise<ProcessHandle>} startProcess
  * Launch a process and resolve to a `ProcessHandle` allowing interaction of the process
  * within the runtime before it ends, e.g. kill or process stdout/stderr
+ *
+ * @property {() => number} monotonicNow
+ * Return milliseconds from a runtime-local monotonic clock. Use this for
+ * elapsed-time measurements that must not be affected by wall-clock changes.
+ * All Engine objects belonging to one tool integration share this clock.
  *
  * @property {() => Promise<string>} createTempDir
  * Create a temporary directory, returning its absolute path.
  * On Linux, it will be owned by current user with file mode 0o700 permissions.
  * On Windows, it will be owned by current user with default ACL permissions.
+ *
+ * @property {(path:string) => Promise<void>} preserveTempDir
+ * Prevent cleanup of a directory returned by `createTempDir`.
  *
  * @property {(path:string) => Promise<void>} mkDir
  * Make a directory
@@ -603,6 +647,9 @@
  * Globs may not rename or reshape wildcarded path segments.
  * `transferOptions` defines configuration options for how the transfer should be executed.
  * Artifacts will only be transferred on successful tool integration, whereas log files will always be collected.
+ * @property {(capabilityId:string, meta:OutputMetadata, capabilityData:CapabilityData) => Promise<void>} addToolCapability
+ * Registers a capability of this tool invocation in the run. This capability can be accessed in the 'render' stage of recipes.
+ * capabilityId must start with a letter or number and contain only letters, numbers, and the following symbols: ._-
  * @property {() => boolean} isFullCaptureSupportEnabled
  * Returns true when the EnableFullCaptureSupport feature flag is enabled
  * @property {() => boolean} isNeoprofTimelineEnabled
@@ -631,6 +678,27 @@
  *
  * @property {(sourceLocality:("target"), sourcePath:string, destinationPath:string) => Promise<void>} copyFrom
  * Copy a file from another locality to the current engine locality and resolve when the copy has completed.
+ * @property {() => PlatformDescription} getPlatform
+ * Return the OS and architecture of the current engine locality's platform.
+ * @property {() => void} notifyCollectionFinished
+ * Notify the engine that collection has finished and the tool is terminating.
+ * Integrations using this method must set `reportsCollectionFinished` to true.
+ */
+
+/**
+ * Describes the OS and architecture of a machine.
+ * @typedef {Object} PlatformDescription
+ * @property {string} Architecture
+ * The architecture of the machine.
+ * @property {string} OS
+ * The OS of the machine.
+ */
+
+/**
+ * @typedef {Object} CapabilityData
+ * @property {string} state - the state of this capability
+ * @property {Object.<string, any>} payload - arbitrary payload data associated with this capability
+ * @description - The contents of a tool capability
  */
 
 /**
@@ -640,7 +708,7 @@
  * Append a chunk of data to the file.
  * @property {() => Promise<void>} close
  * Manually close the underlying writer for the file. Any open handles will be closed automatically when the tool integration completes.
- * @property {string} path
+ * @property {() => string} path
  * Absolute path to the file.
  */
 
@@ -652,7 +720,7 @@
 /**
  * Handle for a running process returned by `engine.startProcess`.
  * @typedef {Object} ProcessHandle
- * @property {number} pid
+ * @property {() => number} pid
  * @property {() => Promise<void>} kill
  * Send SIGKILL (or platform equivalent).
  * @property {() => Promise<void>} interrupt
@@ -713,7 +781,6 @@
  * @property {Object.<string,string>} env                                Environment variables for this invocation.
  * @property {number} timeout                                            Run timeout in seconds.
  * @property {string} toolsRoot                                          Deprecated: legacy target tools root. Use `engine.toolsRoot()` for locality-aware tool resolution.
- * @property {string} engineVersion                                      The current Performix engine version.
  * @property {any} metadata                                              Shared object across run/cancel/stop/reformat
  */
 
@@ -734,12 +801,16 @@
  * @property {ToolDescription} description
  * @property {MigrationEntry[]} [migrations]
  * @property {boolean} [supportsWorkloadLaunch=false]
+ * @property {boolean} [reportsCollectionFinished=false] // whether the integration explicitly notifies the engine when collection finishes
+ * @property {boolean} [supportsStop=true] - Set to false when this tool cannot safely handle a user-requested Stop.
+ *   A run exposes Stop only when every selected tool supports it; one false value disables Stop for the complete run.
  * @property {Parameter[]} [parameters] // parameter definitions accepted by the tool integration
  * @property {(engine:Engine, ctx:ToolContext) => (void|Promise<void>)} run // Entry point for normal execution. May be async.
  * @property {(engine:Engine, ctx:ToolContext) => (ProbeResult | Promise<ProbeResult>)} [probe]
  * @property {(engine:Engine, ctx:ToolContext) => (void|Promise<void>)} reformat // Transform outpule files after run, before they're transferred to the host
  * @property {(engine:Engine, ctx:ToolContext) => (void|Promise<void>)} onCancel // Respond to cancellation.
- * @property {(engine:Engine, ctx:ToolContext) => (void|Promise<void>)} onStop // Force stop
+ * @property {(engine:Engine, ctx:ToolContext) => (void|Promise<void>)} onStop // Required handler for a safe graceful stop.
+ *   This remains required when supportsStop is false, although the normal UI will not offer Stop for a run that includes this tool.
  */
 
 /**
@@ -772,10 +843,9 @@
  * @typedef {Object} ProbeAdvice
  * A single element of the probe result advice, describing an issue or recommendation.
  * @property {string} level // ready, warning, error, unknown
- * @property {string} [message] // The advice message
- * @property {string} [messageCode] // The advice message code
- * @property {Object.<string, string>} [metadata] // (optional) any metadata to attach to the message
- * @property {string} [cause] // (optional) any cause to attach to the message
+ * @property {string} messageCode // The advice message code
+ * @property {Object.<string, string>} [metadata] // optional metadata to attach to the message
+ * @property {string} [cause] // an optional cause to attach to the message
  */
 
 /**

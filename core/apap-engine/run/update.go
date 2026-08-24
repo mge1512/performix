@@ -6,6 +6,7 @@ package run
 import (
 	"context"
 
+	"github.com/Arm-Debug/apap-cli/apap-engine/logging/logx"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 )
 
@@ -215,6 +216,10 @@ func (c *RunCollection) UpdateRun(ctx context.Context, entry RunID, update RunUp
 		}
 	}
 
+	_, err = c.persistRunSizeLocked(ctx, entry)
+	if err != nil {
+		logx.FromContext(ctx).WithField("runId", entry).Warnf("failed to update run size field: %s", err)
+	}
 	return nil
 }
 

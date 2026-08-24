@@ -23,6 +23,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/cdf"
+	"github.com/Arm-Debug/apap-cli/apap-engine/logging/logx"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/perms"
 	"github.com/Arm-Debug/apap-cli/apap-engine/run/recipemigration"
@@ -105,30 +106,6 @@ func (r *ConcreteRunWriter) WriteManifest(builder RunBuilder) error {
 func (r *ConcreteRunWriter) WriteEntityDirs(builder RunBuilder) error {
 	return r.RunCollection.CreateEntityDirs(builder)
 }
-
-type RunResult string
-
-const (
-	RecipeSuccess                         RunResult = "success"
-	RecipeInProgress                      RunResult = "in_progress"
-	RecipeInProgressPhase1Complete        RunResult = "in_progress_phase1_complete"
-	RecipeFailureConnectSSH               RunResult = "failure_connect_ssh"
-	RecipeFailureConnectAgent             RunResult = "failure_connect_to_agent"
-	RecipeFailureCollect                  RunResult = "failure_collect_target_info"
-	RecipeFailureWorkloadOptions          RunResult = "failure_evaluate_workload_options"
-	RecipeFailureNoShell                  RunResult = "failure_no_shell_available"
-	RecipeFailureProfiling                RunResult = "failure_profiling"
-	RecipeFailureIdentify                 RunResult = "failure_identify_target_architecture"
-	RecipeFailureUnsupportedPlatform      RunResult = "failure_target_platform_unsupported"
-	RecipeFailureCheckPlatformSupport     RunResult = "failure_check_platform_support"
-	RecipeFailureRetrieve                 RunResult = "failure_retrieve_output_files"
-	RecipeFailureRetrievePhase1Complete   RunResult = "failure_retrieve_output_files_phase1_complete"
-	RecipeFailureDeploy                   RunResult = "failure_tool_deployment"
-	RecipeFailureStage                    RunResult = "failure_recipe_stage"
-	RecipeFailureTargetLock               RunResult = "failure_target_lock"
-	RecipeFailureIncomplete               RunResult = "failure_incomplete_run"
-	RecipeFailureIncompletePhase1Complete RunResult = "failure_incomplete_run_phase1_complete"
-)
 
 // NewRunCollectionWithSecondaryPaths constructs a new collection of runs at the specified primary path
 // utilizing the secondary paths for lookup. This is used for backwards compatibility with previous run collection locations,
@@ -621,6 +598,10 @@ func (c *RunCollection) writeMetadata(entry RunID, metadata *cdf.Metadata) error
 	return util.WriteJSONFile(c.getMetadataPath(entry), metadata, perms.LocalFilePerm)
 }
 
+func (c *RunCollection) writeMetadataAtomic(entry RunID, metadata *cdf.Metadata) error {
+	return util.WriteJSONFileAtomic(c.getMetadataPath(entry), metadata, perms.LocalFilePerm)
+}
+
 // UpdateRunResult is used to update the recipe result field in the metadata of an existing run.
 // Used in the event of a recipe run success/failure
 func (c *RunCollection) UpdateRunResult(ctx context.Context, entry RunID, recipeResult RunResult, e error) error {
@@ -689,6 +670,176 @@ func (c *RunCollection) SetRunEndTime(ctx context.Context, entry RunID) error {
 	return nil
 }
 
+// PersistRunSize calculates and stores the logical size of a completed run. If the size of the
+// run is already recorded, it will be updated if no longer accurate. The render cache is excluded
+// from the size calculation.
+func (c *RunCollection) PersistRunSize(ctx context.Context, entry RunID) (bool, error) {
+	// Check if run needs update under shared lock - this minimises the number of runs
+	// for which we require an exclusive lock, but does lead to us (necessarily)
+	// calculating the run size twice
+	rUnlock, err := c.RLockRun(ctx, entry)
+	if err != nil {
+		return false, err
+	}
+	cleaner := util.ScopeCleaner{}
+	defer cleaner.MaybeCleanup(func() {
+		_ = rUnlock()
+	})
+
+	metadata, err := c.readMetadata(entry)
+	if err != nil {
+		return false, err
+	}
+	if RecipeResultIsInProgress(RunResult(metadata.RunResult)) {
+		return false, nil
+	}
+
+	sizeBytes, err := c.calculateRunSizeLocked(ctx, entry)
+	if err != nil {
+		return false, err
+	}
+	if metadata.SizeBytes != nil && *metadata.SizeBytes == sizeBytes {
+		return false, nil
+	}
+
+	// Obtain write lock
+	cleaner.CancelCleanup()
+	if err = rUnlock(); err != nil {
+		return false, err
+	}
+	unlock, err := c.LockRun(ctx, entry)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = unlock() }()
+
+	return c.persistRunSizeLocked(ctx, entry)
+}
+
+// persistRunSizeLocked is the internal implementation of PersistRunSize.
+//
+// IMPORTANT: this function *does not* lock the run in question. The caller must
+// already hold a lock on this run before calling this method.
+func (c *RunCollection) persistRunSizeLocked(ctx context.Context, entry RunID) (bool, error) {
+	// Check run is not in progress
+	metadata, err := c.readMetadata(entry)
+	if err != nil {
+		return false, err
+	}
+	if RecipeResultIsInProgress(RunResult(metadata.RunResult)) {
+		return false, nil
+	}
+
+	// Calculate size
+	sizeBytes, err := c.calculateRunSizeLocked(ctx, entry)
+	if err != nil {
+		return false, err
+	}
+
+	if metadata.SizeBytes != nil && *metadata.SizeBytes == sizeBytes {
+		return false, nil
+	}
+	// Including / updating the `size_bytes` field in the run metadata may itself affect
+	// the run size - account for this
+	sizeBytes, err = adjustSizeForMetadata(metadata, sizeBytes)
+	if err != nil {
+		return false, err
+	}
+	metadata.SizeBytes = &sizeBytes
+
+	// Update metadata & persist
+	err = c.writeMetadata(entry, &metadata)
+	if err != nil {
+		msgMetadata := map[string]string{
+			"runID": entry.Value,
+			"path":  c.getMetadataPath(entry),
+		}
+		return false, message.New(message.EngineRunUpdateMetadata).WithCause(err).WithMetadata(msgMetadata)
+	}
+	return true, nil
+}
+
+// calculateRunSizeLocked scans an unsized completed run and calculates its current run size.
+//
+// IMPORTANT: this function *does not* lock the run in question. The caller must
+// already hold a lock on this run before calling this method.
+func (c *RunCollection) calculateRunSizeLocked(ctx context.Context, entry RunID) (uint64, error) {
+	runPath := c.GetRunPath(entry)
+	renderPath := filepath.Join(runPath, renderDirName)
+	var sizeBytes uint64
+	err := filepath.WalkDir(runPath, func(filePath string, dirEntry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if filePath == renderPath && dirEntry.IsDir() {
+			return filepath.SkipDir
+		}
+		if dirEntry.IsDir() {
+			return nil
+		}
+
+		info, err := dirEntry.Info()
+		if err != nil {
+			return err
+		}
+		fileSize := info.Size()
+		if fileSize < 0 || uint64(fileSize) > math.MaxUint64-sizeBytes {
+			return fmt.Errorf("file size invalid")
+		}
+		sizeBytes += uint64(fileSize)
+		return nil
+	})
+	if err != nil {
+		return 0, message.New(message.CommonUnknownError).WithCause(fmt.Errorf("failed to calculate size of run %s: %w", entry.Value, err))
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	return sizeBytes, nil
+}
+
+// adjustSizeForMetadata adjusts the run size on the basis of the `size_bytes` field being added
+// to the metadata (if it doesn't already exist), or updated to the specified value.
+func adjustSizeForMetadata(metadata cdf.Metadata, newSizeBytes uint64) (uint64, error) {
+	var adjusted uint64
+	if metadata.SizeBytes == nil {
+		adjusted = newSizeBytes + uint64(len(fmt.Sprintf(`"run.size_bytes":%d,`, newSizeBytes)))
+	} else {
+		newSizeLength := len(fmt.Sprintf("%d", newSizeBytes))
+		oldSizeLength := len(fmt.Sprintf("%d", *metadata.SizeBytes))
+
+		diff := newSizeLength - oldSizeLength
+		if diff > 0 {
+			// nolint:gosec
+			convertedDiff := uint64(diff)
+			if convertedDiff > math.MaxUint64-newSizeBytes {
+				return 0, message.New(message.CommonUnknownError).WithCause(fmt.Errorf("updated run size too large: %d", diff))
+			}
+			adjusted = newSizeBytes + convertedDiff
+		} else if diff < 0 {
+			// nolint:gosec
+			abs := uint64(-diff)
+			if abs > newSizeBytes {
+				return 0, message.New(message.CommonUnknownError).WithCause(errors.New("updated run size less than 0"))
+			}
+			adjusted = newSizeBytes - abs
+		} else {
+			return newSizeBytes, nil
+		}
+	}
+	digitChange := len(fmt.Sprintf("%d", adjusted)) - len(fmt.Sprintf("%d", newSizeBytes))
+	if digitChange > 0 {
+		adjusted++
+	} else if digitChange < 0 {
+		adjusted--
+	}
+	return adjusted, nil
+}
+
 // UpdateWorkingDir is used to set the working directory for a given run. It is a no-op if the
 // working directory for this run is already set (or if the provided working directory is empty).
 func (c *RunCollection) UpdateWorkingDir(ctx context.Context, entry RunID, workingDir string) error {
@@ -749,6 +900,11 @@ func (c *RunCollection) RenameRun(ctx context.Context, entry RunID, newName stri
 			"path":  c.getMetadataPath(entry),
 		}
 		return message.New(message.EngineRunUpdateMetadata).WithCause(err).WithMetadata(msgMetadata)
+	}
+
+	_, err = c.persistRunSizeLocked(ctx, entry)
+	if err != nil {
+		logx.FromContext(ctx).WithField("runID", entry).Warnf("failed to update run size field: %s", err)
 	}
 	return nil
 }
@@ -909,6 +1065,13 @@ func (c *RunCollection) ImportRun(runPath string) (RunID, error) {
 				WithCause(err)
 		}
 		return RunID{}, message.New(message.EngineRunZipFileInvalid).WithCause(err).WithMetadata(map[string]string{"zipPath": runPath})
+	}
+
+	updated, err := c.PersistRunSize(context.Background(), runID)
+	if err != nil {
+		log.WithError(err).WithField("runId", runID.Value).Warn("Could not persist imported run size")
+	} else if updated {
+		log.WithField("runId", runID.Value).Debug("Supplemented run with on-disk size")
 	}
 
 	return runID, nil
@@ -1372,7 +1535,16 @@ type RunDescription struct {
 	Timeout             uint32
 	RunResult           string
 	RunError            string
+	SizeBytes           *uint64
 	ToolsUsed           []cdf.ToolUsed
+	SupportsStop        bool
+}
+
+func runSupportsStop(metadata cdf.Metadata) bool {
+	if metadata.SupportsStop != nil {
+		return *metadata.SupportsStop
+	}
+	return true
 }
 
 // RunDescription produces a run description in preparation for listing on the
@@ -1436,7 +1608,9 @@ func (c *RunCollection) RunDescription(ctx context.Context, run RunID) (*RunDesc
 		Timeout:             metadata.Timeout,
 		RunResult:           metadata.RunResult,
 		RunError:            metadata.RunError,
+		SizeBytes:           metadata.SizeBytes,
 		ToolsUsed:           manifest.ToolsUsed,
+		SupportsStop:        runSupportsStop(metadata),
 	}, nil
 }
 

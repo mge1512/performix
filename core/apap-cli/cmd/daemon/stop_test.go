@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Arm-Debug/apap-cli/apap-cli/cmd/mocks"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/terminology"
 	"github.com/Arm-Debug/apap-cli/clients/go/apapproto"
 	apapprotomocks "github.com/Arm-Debug/apap-cli/clients/go/mocks"
@@ -49,6 +50,22 @@ func TestDaemonStopCmd(t *testing.T) {
 			assert.ErrorIs(t, err, expectedError)
 		})
 
+		t.Run("returns info when connector finds no responsive daemon", func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			host, port := "127.0.0.1", 9000
+			viper.Set("server-hostname", host)
+			viper.Set("server-port", port)
+			cc := &mocks.MockClientConnector{}
+			cc.SetClient(nil, message.New(message.EngineGrpcconnectionServerDidNotRespond))
+			ss := &mockServerShutter{}
+
+			cmd := newDaemonStopCmd(cc, ss)
+			err := cmd.Execute()
+
+			assertNoResponsiveDaemonMessage(t, err)
+		})
+
 		t.Run("returns error when service fails", func(t *testing.T) {
 			expectedError := errors.New("‼️")
 			client := apapprotomocks.NewApapClient(t)
@@ -62,6 +79,24 @@ func TestDaemonStopCmd(t *testing.T) {
 
 			require.Error(t, err)
 			assert.ErrorIs(t, err, expectedError)
+		})
+
+		t.Run("returns info when shutdown finds no responsive daemon", func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			host, port := "127.0.0.1", 9000
+			viper.Set("server-hostname", host)
+			viper.Set("server-port", port)
+			client := apapprotomocks.NewApapClient(t)
+			cc := &mocks.MockClientConnector{}
+			cc.SetClient(client, nil)
+			ss := &mockServerShutter{}
+			ss.On("Shutdown", client).Return(message.New(message.EngineGrpcconnectionServerDidNotRespond))
+
+			cmd := newDaemonStopCmd(cc, ss)
+			err := cmd.Execute()
+
+			assertNoResponsiveDaemonMessage(t, err)
 		})
 
 		t.Run("returns no error and prints when service succeeds", func(t *testing.T) {
@@ -127,4 +162,14 @@ func TestDaemonStopCmd(t *testing.T) {
 			)
 		})
 	})
+}
+
+func assertNoResponsiveDaemonMessage(t testing.TB, err error) {
+	t.Helper()
+	require.Error(t, err)
+	msg := message.IsMessage(err)
+	require.NotNil(t, msg)
+	assert.Equal(t, message.CliCmdDaemonStopNoResponsiveDaemon, msg.Code())
+	assert.Equal(t, "127.0.0.1:9000", msg.Metadata()["serverAddress"])
+	assert.True(t, msg.IsInfoOrWarning())
 }

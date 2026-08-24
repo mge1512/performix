@@ -236,7 +236,7 @@ let tool = {
       if (isElevatePrivilegeError(err)) {
         throw err;
       }
-      if (isUserInterruptionError(err)) {
+      if (isUserInterruptionError(err) || err.code !== undefined) {
         runError = err;
       } else {
         runError = {
@@ -348,9 +348,9 @@ function isUserCancellationRequested(ctx) {
 
 function getUserInterruptionError(ctx) {
   if (ctx.metadata?.cancelRequested === true) {
-    return { code: 'engine.common.USER_CANCELLATION_ERROR' };
+    return { code: 'engine.common.USER_CANCELED' };
   }
-  return { code: 'engine.common.USER_STOPPED_ERROR' };
+  return { code: 'engine.common.USER_STOPPED' };
 }
 
 function isUserInterruptionError(err) {
@@ -358,8 +358,8 @@ function isUserInterruptionError(err) {
     !!err &&
     typeof err === 'object' &&
     'code' in err &&
-    (err.code === 'engine.common.USER_CANCELLATION_ERROR' ||
-      err.code === 'engine.common.USER_STOPPED_ERROR')
+    (err.code === 'engine.common.USER_CANCELED' ||
+      err.code === 'engine.common.USER_STOPPED')
   );
 }
 

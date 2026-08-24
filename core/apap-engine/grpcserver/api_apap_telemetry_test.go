@@ -23,7 +23,7 @@ func TestGetTelemetrySpecification(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, response.Specification)
 	assert.Equal(t, "Neoverse-V3AE", response.Specification.CpuModel)
-	assert.Contains(t, response.Specification.Json, "Telemetry Specification (PMU Events, Metrics and Methodology) for Neoverse V3 processor")
+	assert.Contains(t, response.Specification.Json, "Telemetry Specification (PMU Events, Metrics and Methodology) for Neoverse V3AE processor")
 }
 
 func TestGetTelemetrySpecificationReturnsEmptyResponseForUnsupportedCPU(t *testing.T) {

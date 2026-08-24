@@ -42,6 +42,9 @@ func (v *ValidateTargetPIDStage) AlwaysExecute() bool {
 }
 
 func (v *ValidateTargetPIDStage) Execute(stageContext *recipe.StageContext) (func(), error) {
+	if stageContext.CachedAgentProcessListErr != nil {
+		return nil, stageContext.CachedAgentProcessListErr
+	}
 	procList := stageContext.CachedAgentProcessList
 	if !agentProcessListContainsPID(procList, v.Pid) {
 		return nil, v.pidNotFoundError(v.Pid)

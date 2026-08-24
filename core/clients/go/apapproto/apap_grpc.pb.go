@@ -25,6 +25,7 @@ const _ = grpc.SupportPackageIsVersion8
 const (
 	Apap_Shutdown_FullMethodName                  = "/apap.Apap/Shutdown"
 	Apap_GetVersion_FullMethodName                = "/apap.Apap/GetVersion"
+	Apap_SetAdbPath_FullMethodName                = "/apap.Apap/SetAdbPath"
 	Apap_GetTelemetrySpecification_FullMethodName = "/apap.Apap/GetTelemetrySpecification"
 	Apap_ListRuns_FullMethodName                  = "/apap.Apap/ListRuns"
 	Apap_GetRunDescription_FullMethodName         = "/apap.Apap/GetRunDescription"
@@ -66,6 +67,8 @@ type ApapClient interface {
 	Shutdown(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the version of the connected server
 	GetVersion(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ServiceVersion, error)
+	// Update the adb executable used by Android target operations
+	SetAdbPath(ctx context.Context, in *SetAdbPathRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Get the telemetry specification for a supported CPU model
 	GetTelemetrySpecification(ctx context.Context, in *GetTelemetrySpecificationRequest, opts ...grpc.CallOption) (*GetTelemetrySpecificationResponse, error)
 	// Return descriptions of all runs
@@ -149,6 +152,16 @@ func (c *apapClient) GetVersion(ctx context.Context, in *emptypb.Empty, opts ...
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ServiceVersion)
 	err := c.cc.Invoke(ctx, Apap_GetVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *apapClient) SetAdbPath(ctx context.Context, in *SetAdbPathRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Apap_SetAdbPath_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -501,6 +514,8 @@ type ApapServer interface {
 	Shutdown(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Get the version of the connected server
 	GetVersion(context.Context, *emptypb.Empty) (*ServiceVersion, error)
+	// Update the adb executable used by Android target operations
+	SetAdbPath(context.Context, *SetAdbPathRequest) (*emptypb.Empty, error)
 	// Get the telemetry specification for a supported CPU model
 	GetTelemetrySpecification(context.Context, *GetTelemetrySpecificationRequest) (*GetTelemetrySpecificationResponse, error)
 	// Return descriptions of all runs
@@ -572,6 +587,9 @@ func (UnimplementedApapServer) Shutdown(context.Context, *emptypb.Empty) (*empty
 }
 func (UnimplementedApapServer) GetVersion(context.Context, *emptypb.Empty) (*ServiceVersion, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetVersion not implemented")
+}
+func (UnimplementedApapServer) SetAdbPath(context.Context, *SetAdbPathRequest) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetAdbPath not implemented")
 }
 func (UnimplementedApapServer) GetTelemetrySpecification(context.Context, *GetTelemetrySpecificationRequest) (*GetTelemetrySpecificationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTelemetrySpecification not implemented")
@@ -705,6 +723,24 @@ func _Apap_GetVersion_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ApapServer).GetVersion(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Apap_SetAdbPath_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetAdbPathRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApapServer).SetAdbPath(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Apap_SetAdbPath_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApapServer).SetAdbPath(ctx, req.(*SetAdbPathRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1251,6 +1287,10 @@ var Apap_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetVersion",
 			Handler:    _Apap_GetVersion_Handler,
+		},
+		{
+			MethodName: "SetAdbPath",
+			Handler:    _Apap_SetAdbPath_Handler,
 		},
 		{
 			MethodName: "GetTelemetrySpecification",

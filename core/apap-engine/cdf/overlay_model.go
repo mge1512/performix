@@ -202,6 +202,31 @@ func (m *OverlayModel) FindEntities(glob string) ([]Entity, error) {
 	), nil
 }
 
+// FindComponents returns the de-duplicated union of overlay and base components.
+func (m *OverlayModel) FindComponents(glob string) ([]Component, error) {
+	overlayComponents, overlayErr := m.overlay.FindComponents(glob)
+	if overlayErr != nil && !isNotExist(overlayErr) {
+		return nil, overlayErr
+	}
+
+	baseComponents, baseErr := m.base.FindComponents(glob)
+	if baseErr != nil && !isNotExist(baseErr) {
+		return nil, baseErr
+	}
+	if isNotExist(overlayErr) && isNotExist(baseErr) {
+		return nil, fs.ErrNotExist
+	}
+
+	baseComponents = filterOutsideOverlayRoot(m.base.BasePath(), m.overlay.BasePath(), baseComponents, func(component Component) string {
+		return component.RelativePath
+	})
+	return mergeByRelativePath(
+		overlayComponents,
+		baseComponents,
+		func(component Component) string { return component.RelativePath },
+	), nil
+}
+
 // ListEntityComponents returns the de-duplicated union of overlay and base components for an entity.
 func (m *OverlayModel) ListEntityComponents(entity Entity) ([]Component, error) {
 	overlayComponents, overlayErr := m.overlay.ListEntityComponents(entity)
@@ -255,6 +280,14 @@ func (m *OverlayModel) ListEntityComponentsMatching(entity Entity, pred func(*Co
 // Metadata returns overlay metadata if available, otherwise base metadata.
 func (m *OverlayModel) Metadata() Metadata {
 	return m.overlay.Metadata()
+}
+
+// Migrations returns overlay migrations if available, otherwise base migrations.
+func (m *OverlayModel) Migrations() []PathMigration {
+	if overlayMigrations := m.overlay.Migrations(); overlayMigrations != nil {
+		return m.overlay.Migrations()
+	}
+	return m.base.Migrations()
 }
 
 // BasePath returns the base path of the overlay if available, otherwise the base path of the base model.

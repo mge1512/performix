@@ -45,6 +45,98 @@ func TestUpdateRun(t *testing.T) {
 		assert.Equal(t, []string{"/foo", "/bar"}, sourcePaths.Paths)
 	})
 
+	t.Run("updates a terminal run size after applying an update", func(t *testing.T) {
+		runCollection := NewTestRunCollection(t, t.TempDir())
+		builder, err := runCollection.RunBuilder()
+		require.NoError(t, err)
+		runID, err := runCollection.CreateRun(builder, &cdf.Metadata{
+			RunResult:    string(RecipeSuccess),
+			TargetConfig: emptySSHTargetConfig,
+		})
+		require.NoError(t, err)
+		require.NoError(t, WriteHostSourceCodePath(
+			runCollection.getSourceCodePath(runID),
+			&HostSourceCodePath{Paths: []string{"a"}},
+		))
+
+		updated, err := runCollection.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+		metadata, err := runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		initialSize := *metadata.SizeBytes
+
+		err = runCollection.UpdateRun(context.Background(), runID, RunUpdate{
+			Operations: []RunUpdateOperation{
+				SetHostSourceCodePaths{HostSourceCodePaths: HostSourceCodePath{Paths: []string{"aaaa"}}},
+			},
+		})
+		require.NoError(t, err)
+
+		sourcePaths, err := ReadHostSourceCodePath(runCollection.getSourceCodePath(runID))
+		require.NoError(t, err)
+		require.Equal(t, []string{"aaaa"}, sourcePaths.Paths)
+		metadata, err = runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		require.Equal(t, initialSize+3, *metadata.SizeBytes)
+
+		unlock, err := runCollection.RLockRun(context.Background(), runID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, unlock()) }()
+		calculatedSize, err := runCollection.calculateRunSizeLocked(context.Background(), runID)
+		require.NoError(t, err)
+		require.Equal(t, calculatedSize, *metadata.SizeBytes)
+	})
+
+	t.Run("failure to update run size field is non-blocking", func(t *testing.T) {
+		runCollection := NewTestRunCollection(t, t.TempDir())
+		builder, err := runCollection.RunBuilder()
+		require.NoError(t, err)
+		runID, err := runCollection.CreateRun(builder, &cdf.Metadata{
+			RunResult:    string(RecipeSuccess),
+			TargetConfig: emptySSHTargetConfig,
+		})
+		require.NoError(t, err)
+		require.NoError(t, WriteHostSourceCodePath(
+			runCollection.getSourceCodePath(runID),
+			&HostSourceCodePath{Paths: []string{"a"}},
+		))
+
+		updated, err := runCollection.PersistRunSize(context.Background(), runID)
+		require.NoError(t, err)
+		require.True(t, updated)
+		metadata, err := runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		initialSize := *metadata.SizeBytes
+
+		ctx := newCancelOnErrContext()
+		err = runCollection.UpdateRun(ctx, runID, RunUpdate{
+			Operations: []RunUpdateOperation{
+				SetHostSourceCodePaths{HostSourceCodePaths: HostSourceCodePath{Paths: []string{"aaaa"}}},
+			},
+		})
+		require.NoError(t, err)
+		require.True(t, ctx.isCanceled())
+
+		sourcePaths, err := ReadHostSourceCodePath(runCollection.getSourceCodePath(runID))
+		require.NoError(t, err)
+		require.Equal(t, []string{"aaaa"}, sourcePaths.Paths)
+		metadata, err = runCollection.readMetadata(runID)
+		require.NoError(t, err)
+		require.NotNil(t, metadata.SizeBytes)
+		require.Equal(t, initialSize, *metadata.SizeBytes)
+
+		unlock, err := runCollection.RLockRun(context.Background(), runID)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, unlock()) }()
+		calculatedSize, err := runCollection.calculateRunSizeLocked(context.Background(), runID)
+		require.NoError(t, err)
+		require.Equal(t, initialSize+3, calculatedSize)
+	})
+
 	t.Run("clears source code paths", func(t *testing.T) {
 		runCollection := NewTestRunCollection(t, t.TempDir())
 		runID := createUpdateTestRun(t, runCollection)

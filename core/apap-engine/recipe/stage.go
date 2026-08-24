@@ -39,6 +39,7 @@ type StageContext struct {
 	ParameterValidationResult ParamValidation
 	ParameterOptions          ParameterOptions
 	CachedAgentProcessList    *targetagentproto.ProcessList
+	CachedAgentProcessListErr error
 }
 
 // Stage defines a simple interface that each stage of the

@@ -4,6 +4,7 @@
 package render
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -13,18 +14,27 @@ import (
 )
 
 type RendererSpec struct {
-	Graph       Digraph
-	Configs     RendererConfigList
-	DataSources []map[string][]DataSource
+	Graph        Digraph
+	Configs      RendererConfigList
+	Dependencies []Dependencies
 }
 
-func NewRendererSpec(configs RendererConfigList, dataSources []map[string][]DataSource) (RendererSpec, []error, error) {
+type RendererDependency struct {
+	RendererID string `json:"renderer_id"`
+}
+
+type Dependencies struct {
+	Tables    DataSourcesMap
+	Renderers []RendererDependency
+}
+
+func NewRendererSpec(configs RendererConfigList, dependencies []Dependencies) (RendererSpec, []error, error) {
 	nodes := make(NodeSet, len(configs))
 	errs := make([]error, len(configs))
 	successors := map[NodeID]NodeSet{}
 	for i := range configs {
 		nodes[NodeID(i)] = struct{}{}
-		errs[i] = addSuccessorsFromDataSources(successors, dataSources[i], configs, i)
+		errs[i] = addSuccessorsFromDependencies(successors, dependencies[i], configs, i)
 	}
 
 	digraph, err := NewDigraph(nodes, successors)
@@ -38,14 +48,25 @@ func NewRendererSpec(configs RendererConfigList, dataSources []map[string][]Data
 	errs = merge(errs, propagationErrs)
 
 	spec := RendererSpec{
-		Graph:       digraph,
-		Configs:     configs,
-		DataSources: dataSources,
+		Graph:        digraph,
+		Configs:      configs,
+		Dependencies: dependencies,
 	}
 	return spec, errs, nil
 }
 
-func addSuccessorsFromDataSources(successors map[NodeID]NodeSet, dataSources map[string][]DataSource, configs RendererConfigList, dependeeIndex int) error {
+func addSuccessorsFromDependencies(successors map[NodeID]NodeSet, dependencies Dependencies, configs RendererConfigList, dependeeIndex int) error {
+	var errs []error
+	if err := addSuccessorFromTableDependencies(successors, dependencies.Tables, configs, dependeeIndex); err != nil {
+		errs = append(errs, err)
+	}
+	if err := addSuccessorsFromRendererDependencies(successors, dependencies.Renderers, configs, dependeeIndex); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func addSuccessorFromTableDependencies(successors map[NodeID]NodeSet, dataSources map[string][]DataSource, configs RendererConfigList, dependeeIndex int) error {
 	if dataSources == nil {
 		return nil
 	}
@@ -57,24 +78,38 @@ func addSuccessorsFromDataSources(successors map[NodeID]NodeSet, dataSources map
 				continue
 			}
 
-			dependencyIndex := rendererIndexFromID(otr.RendererID, configs)
-			if dependencyIndex == -1 {
-				if err == nil {
-					err = fmt.Errorf("unknown renderer ID %v", otr.RendererID)
-				}
-				continue
-			}
-			// Add dependeeIndex as a successor of dependencyIndex, creating the map of successors if necessary
-			dependency := successors[NodeID(dependencyIndex)]
-			if dependency == nil {
-				successors[NodeID(dependencyIndex)] = NodeSet{NodeID(dependeeIndex): {}}
-			} else {
-				dependency[NodeID(dependeeIndex)] = struct{}{}
+			if successorErr := addSuccessor(successors, otr.RendererID, configs, dependeeIndex); successorErr != nil && err == nil {
+				err = successorErr
 			}
 		}
 	}
 
 	return err
+}
+
+func addSuccessorsFromRendererDependencies(successors map[NodeID]NodeSet, dependencies []RendererDependency, configs RendererConfigList, dependeeIndex int) error {
+	var err error
+	for _, dependency := range dependencies {
+		if successorErr := addSuccessor(successors, dependency.RendererID, configs, dependeeIndex); successorErr != nil && err == nil {
+			err = successorErr
+		}
+	}
+	return err
+}
+
+func addSuccessor(successors map[NodeID]NodeSet, rendererID string, configs RendererConfigList, dependeeIndex int) error {
+	dependencyIndex := rendererIndexFromID(rendererID, configs)
+	if dependencyIndex == -1 {
+		return fmt.Errorf("unknown renderer ID %v", rendererID)
+	}
+
+	dependency := successors[NodeID(dependencyIndex)]
+	if dependency == nil {
+		successors[NodeID(dependencyIndex)] = NodeSet{NodeID(dependeeIndex): {}}
+		return nil
+	}
+	dependency[NodeID(dependeeIndex)] = struct{}{}
+	return nil
 }
 
 func rendererIndexFromID(id string, configs RendererConfigList) int {

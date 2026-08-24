@@ -11,23 +11,26 @@ import (
 	"sync"
 )
 
-//go:embed "data/neoverse-n1.json"
+//go:embed "data/public/neoverse-n1.json"
 var NeoverseN1JSON string
 
-//go:embed "data/neoverse-n2.json"
+//go:embed "data/public/neoverse-n2.json"
 var NeoverseN2JSON string
 
-//go:embed "data/neoverse-n3.json"
+//go:embed "data/public/neoverse-n3.json"
 var NeoverseN3JSON string
 
-//go:embed "data/neoverse-v1.json"
+//go:embed "data/public/neoverse-v1.json"
 var NeoverseV1JSON string
 
-//go:embed "data/neoverse-v2.json"
+//go:embed "data/public/neoverse-v2.json"
 var NeoverseV2JSON string
 
-//go:embed "data/neoverse-v3.json"
+//go:embed "data/public/neoverse-v3.json"
 var NeoverseV3JSON string
+
+//go:embed "data/public/neoverse-v3ae.json"
+var NeoverseV3AEJSON string
 
 var telemetryDataByCPUModel = map[string]string{
 	"Neoverse-N1":   NeoverseN1JSON,
@@ -36,7 +39,7 @@ var telemetryDataByCPUModel = map[string]string{
 	"Neoverse-V1":   NeoverseV1JSON,
 	"Neoverse-V2":   NeoverseV2JSON,
 	"Neoverse-V3":   NeoverseV3JSON,
-	"Neoverse-V3AE": NeoverseV3JSON,
+	"Neoverse-V3AE": NeoverseV3AEJSON,
 }
 
 var telemetryDataParsed = sync.Map{}
@@ -114,10 +117,12 @@ func ParseTelemetryJSON(jsonStr string) (*Payload, error) {
 
 // SupportedCPUModels returns the CPU models with embedded telemetry.
 func SupportedCPUModels() []string {
-	models := make([]string, 0, len(telemetryDataByCPUModel))
+	cortexModels := cortexCPUModels()
+	models := make([]string, 0, len(telemetryDataByCPUModel)+len(cortexModels))
 	for model := range telemetryDataByCPUModel {
 		models = append(models, model)
 	}
+	models = append(models, cortexModels...)
 	sort.Strings(models)
 	return models
 }
@@ -125,6 +130,9 @@ func SupportedCPUModels() []string {
 // GetSpecification returns the complete telemetry specification for a supported CPU model.
 func GetSpecification(cpuModel string) (Specification, bool) {
 	jsonStr, ok := telemetryDataByCPUModel[cpuModel]
+	if !ok {
+		jsonStr, ok = resolveCortex(cpuModel)
+	}
 	if !ok {
 		return Specification{}, false
 	}

@@ -5,7 +5,6 @@ package toolimpl
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +18,8 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/Arm-Debug/apap-cli/apap-engine/insights"
+	"github.com/Arm-Debug/apap-cli/apap-cli/service/mcpserver/insights"
+	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	"github.com/Arm-Debug/apap-cli/apap-engine/terminology"
 	"github.com/Arm-Debug/apap-cli/clients/go/apapproto"
 )
@@ -36,14 +36,6 @@ const (
 	defaultAIInsightsCacheMaxBundles = 10
 	generateAIInsightsErrorSchemaID  = toolErrorSchemaID + ":generate-ai-insights"
 )
-
-// aiInsightsGuidance describes how to interpret the evidence bundle and how to shape the
-// resulting insights. It is returned with the tool result so that the guidance only reaches
-// the agent when generate_ai_insights is actually invoked, rather than as server-wide
-// instructions.
-//
-//go:embed ai_insights_guidance.md
-var aiInsightsGuidance string
 
 type GenerateAIInsightsTool struct{}
 
@@ -62,8 +54,8 @@ var generateAIInsightsInputSchema = &jsonschema.Schema{
 	},
 }
 
-// The supported list of recipes is sourced from the engine's insights package (single source of truth),
-// so it cannot drift from the list of recipes for which we have summarizers
+// The recipe names come from the same allowlist used by generate_ai_insights,
+// so the description cannot drift from the recipes the tool accepts.
 func generateAIInsightsRunIDDescription() string {
 	return "ID of an existing successful recipe run to analyze. " +
 		"Only runs produced by a recipe that supports AI Insights can be analyzed (currently: " +
@@ -128,7 +120,7 @@ type aiInsightsPayloadDetails struct {
 	Error         *toolError `json:"error,omitempty"`
 }
 
-type cachedAIInsightsPayload struct {
+type aiInsightsPayload struct {
 	name           string
 	promptFragment string
 	payload        string
@@ -137,7 +129,7 @@ type cachedAIInsightsPayload struct {
 type aiInsightsBundleCache struct {
 	mu      sync.Mutex
 	nextID  uint64
-	bundles *lru.Cache[string, []cachedAIInsightsPayload]
+	bundles *lru.Cache[string, []aiInsightsPayload]
 }
 
 func aiInsightsPayloadDetailsOutputSchemaProperties() map[string]*jsonschema.Schema {
@@ -182,8 +174,9 @@ var aiInsightsPayloadDetailsOutputSchema = &jsonschema.Schema{
 
 var generateAIInsightsOutputSchema = &jsonschema.Schema{
 	Type: "object",
-	// payloads is always serialized (initialized to an empty slice on every path, including
-	// errors), so it is required and never null, matching the result the tool actually returns.
+	// payloads is always serialised (initialised to an empty slice on every
+	// path, including errors), so it is required and never null, matching the
+	// result the tool actually returns.
 	Required: []string{"payloads"},
 	Properties: map[string]*jsonschema.Schema{
 		"bundle_id": {
@@ -196,7 +189,7 @@ var generateAIInsightsOutputSchema = &jsonschema.Schema{
 		},
 		"guidance": {
 			Type:        "string",
-			Description: "Instructions for interpreting the evidence bundle and shaping the resulting insights.",
+			Description: "Instructions for interpreting the evidence and shaping the resulting insights.",
 		},
 		"payloads": {
 			Type:        "array",
@@ -230,9 +223,9 @@ func (GenerateAIInsightsTool) Register(server *mcp.Server, toolDeps ToolDependen
 func registerGenerateAIInsightsTool(server *mcp.Server, toolDeps ToolDependencies, cache *aiInsightsBundleCache) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "generate_ai_insights",
-		Description: "Prepares and caches an evidence bundle ready for an AI model to consume for an existing successful " + terminology.GetProductFullName() + " run. " +
-			"The result contains guidance plus initial details for each summarizer payload. If a payload is incomplete, call read_ai_insights_payload_details with the returned " +
-			"bundle_id, payload name, and next_offset to continue reading it.",
+		Description: "Prepares an existing successful " + terminology.GetProductFullName() + " run for AI Insights. " +
+			"The result contains the evidence or recipe guidance needed to analyse the run. Follow the returned guidance. " +
+			"If a payload is incomplete, call read_ai_insights_payload_details with the returned bundle_id, payload name, and next_offset to continue reading it.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint: true,
 		},
@@ -241,30 +234,121 @@ func registerGenerateAIInsightsTool(server *mcp.Server, toolDeps ToolDependencie
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input generateAIInsightsInput) (*mcp.CallToolResult, generateAIInsightsResult, error) {
 		runID := strings.TrimSpace(input.RunID)
 		if runID == "" {
-			return &mcp.CallToolResult{IsError: true}, generateAIInsightsResult{Payloads: []aiInsightsInitialPayloadDetails{}, Error: newToolError(errors.New("run_id is required"))}, nil
+			return generateAIInsightsErrorResult(errors.New("run_id is required"))
+		}
+
+		description, err := toolDeps.Engine.GetRunDescription(ctx, &apapproto.GetRunDescriptionRequest{
+			Id: &apapproto.RunId{Value: runID},
+		})
+		if err != nil {
+			return generateAIInsightsErrorResult(err)
+		}
+		metadata := description.GetMetadata()
+		if metadata == nil {
+			return generateAIInsightsErrorResult(errors.New("run description contains no metadata"))
+		}
+		recipeName := metadata.GetRecipeName()
+		recipe, ok := insights.ForRecipe(recipeName)
+		if !ok {
+			return generateAIInsightsErrorResult(
+				message.New(message.EngineInsightsUnsupportedRecipe).WithMetadata(map[string]string{
+					"unsupportedRecipe":    recipeName,
+					"supportedRecipesList": strings.Join(insights.SupportedRecipeNames(), ", "),
+				}),
+			)
 		}
 
 		resp, err := toolDeps.Engine.GetRunSummaryBundle(ctx, &apapproto.RunSummaryBundleRequest{
 			RunId: &apapproto.RunId{Value: runID},
 		})
 		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, generateAIInsightsResult{Payloads: []aiInsightsInitialPayloadDetails{}, Error: newToolError(err)}, nil
+			return generateAIInsightsErrorResult(err)
+		}
+		runDetails := runSummaryPayloadByName(resp.GetPayloads(), "run_details")
+		if runDetails == nil {
+			return generateAIInsightsErrorResult(errors.New("run details are unavailable"))
 		}
 
-		payloads, err := newCachedAIInsightsPayloads(resp)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, generateAIInsightsResult{Payloads: []aiInsightsInitialPayloadDetails{}, Error: newToolError(err)}, nil
+		guidanceText := insights.GeneralGuidance() + "\n\n" + recipe.Guidance
+		switch recipe.Method {
+		case insights.MethodRunQuery:
+			result, err := generateQueryResult(runDetails, runID, guidanceText)
+			if err != nil {
+				return generateAIInsightsErrorResult(err)
+			}
+			return nil, result, nil
+		case insights.MethodCuratedSummary:
+			result, err := generateEvidenceBundleResult(resp, cache, runID, guidanceText)
+			if err != nil {
+				return generateAIInsightsErrorResult(err)
+			}
+			return nil, result, nil
+		default:
+			return generateAIInsightsErrorResult(fmt.Errorf(
+				"AI Insights recipe %q has unknown method %q",
+				recipeName,
+				recipe.Method,
+			))
 		}
-
-		bundleID := cache.newBundleID(runID)
-		result, err := newGenerateAIInsightsResult(bundleID, runID, payloads)
-		if err != nil {
-			return &mcp.CallToolResult{IsError: true}, generateAIInsightsResult{Payloads: []aiInsightsInitialPayloadDetails{}, Error: newToolError(err)}, nil
-		}
-		cache.store(bundleID, payloads)
-
-		return nil, result, nil
 	})
+}
+
+func generateAIInsightsErrorResult(err error) (*mcp.CallToolResult, generateAIInsightsResult, error) {
+	return &mcp.CallToolResult{IsError: true}, generateAIInsightsResult{
+		Payloads: []aiInsightsInitialPayloadDetails{},
+		Error:    newToolError(err),
+	}, nil
+}
+
+// RunDetailsSummarizer produces basic run context shared by both analysis
+// methods. Run-query recipes return that section with their query guidance.
+// The section is returned in full and does not need a pagination cache entry.
+func generateQueryResult(runDetails *apapproto.RunSummaryPayload, runID, guidanceText string) (generateAIInsightsResult, error) {
+	payloads, err := newAIInsightsPayloads([]*apapproto.RunSummaryPayload{runDetails})
+	if err != nil {
+		return generateAIInsightsResult{}, err
+	}
+
+	result := generateAIInsightsResult{
+		RunID:    runID,
+		Guidance: guidanceText,
+		Payloads: []aiInsightsInitialPayloadDetails{
+			newAIInsightsInitialPayloadDetails(payloads[0], 0, payloads[0].payload),
+		},
+	}
+	if err := ensureJSONSizeAtMost(result, aiInsightsMaxResponseBytes); err != nil {
+		return generateAIInsightsResult{}, fmt.Errorf("AI Insights run details exceed maximum response size: %w", err)
+	}
+	return result, nil
+}
+
+func runSummaryPayloadByName(payloads []*apapproto.RunSummaryPayload, name string) *apapproto.RunSummaryPayload {
+	for _, payload := range payloads {
+		if payload.GetName() == name {
+			return payload
+		}
+	}
+	return nil
+}
+
+func generateEvidenceBundleResult(resp *apapproto.RunSummaryBundleResponse, cache *aiInsightsBundleCache, runID, guidanceText string) (generateAIInsightsResult, error) {
+	payloads, err := newAIInsightsPayloads(resp.GetPayloads())
+	if err != nil {
+		return generateAIInsightsResult{}, err
+	}
+
+	bundleID := cache.newBundleID(runID)
+	result, err := newGenerateAIInsightsResult(
+		bundleID,
+		runID,
+		payloads,
+		guidanceText,
+	)
+	if err != nil {
+		return generateAIInsightsResult{}, err
+	}
+	cache.store(bundleID, payloads)
+	return result, nil
 }
 
 func registerReadAIInsightsPayloadDetailsTool(server *mcp.Server, cache *aiInsightsBundleCache) {
@@ -313,11 +397,11 @@ func registerReadAIInsightsPayloadDetailsTool(server *mcp.Server, cache *aiInsig
 	})
 }
 
-func newGenerateAIInsightsResult(bundleID string, runID string, payloads []cachedAIInsightsPayload) (generateAIInsightsResult, error) {
+func newGenerateAIInsightsResult(bundleID string, runID string, payloads []aiInsightsPayload, guidanceText string) (generateAIInsightsResult, error) {
 	result := generateAIInsightsResult{
 		BundleID: bundleID,
 		RunID:    runID,
-		Guidance: aiInsightsGuidance,
+		Guidance: guidanceText,
 		Payloads: []aiInsightsInitialPayloadDetails{},
 	}
 
@@ -345,10 +429,10 @@ func newGenerateAIInsightsResult(bundleID string, runID string, payloads []cache
 	return result, nil
 }
 
-func newCachedAIInsightsPayloads(resp *apapproto.RunSummaryBundleResponse) ([]cachedAIInsightsPayload, error) {
-	payloads := []cachedAIInsightsPayload{}
+func newAIInsightsPayloads(summaryPayloads []*apapproto.RunSummaryPayload) ([]aiInsightsPayload, error) {
+	payloads := []aiInsightsPayload{}
 	names := map[string]struct{}{}
-	for _, payload := range resp.GetPayloads() {
+	for _, payload := range summaryPayloads {
 		name := strings.TrimSpace(payload.GetName())
 		if name == "" {
 			return nil, errors.New("AI Insights payload name is required")
@@ -358,7 +442,7 @@ func newCachedAIInsightsPayloads(resp *apapproto.RunSummaryBundleResponse) ([]ca
 		}
 		names[name] = struct{}{}
 
-		payloads = append(payloads, cachedAIInsightsPayload{
+		payloads = append(payloads, aiInsightsPayload{
 			name:           name,
 			promptFragment: payload.GetPromptFragment(),
 			payload:        payload.GetPayload(),
@@ -368,17 +452,17 @@ func newCachedAIInsightsPayloads(resp *apapproto.RunSummaryBundleResponse) ([]ca
 	return payloads, nil
 }
 
-func aiInsightsPayloadByName(payloads []cachedAIInsightsPayload, name string) (cachedAIInsightsPayload, bool) {
+func aiInsightsPayloadByName(payloads []aiInsightsPayload, name string) (aiInsightsPayload, bool) {
 	for _, payload := range payloads {
 		if payload.name == name {
 			return payload, true
 		}
 	}
 
-	return cachedAIInsightsPayload{}, false
+	return aiInsightsPayload{}, false
 }
 
-func fitAIInsightsInitialPayloadDetails(payload cachedAIInsightsPayload, offset int, resultForDetails func(aiInsightsInitialPayloadDetails) any) (aiInsightsInitialPayloadDetails, error) {
+func fitAIInsightsInitialPayloadDetails(payload aiInsightsPayload, offset int, resultForDetails func(aiInsightsInitialPayloadDetails) any) (aiInsightsInitialPayloadDetails, error) {
 	if offset < 0 {
 		return aiInsightsInitialPayloadDetails{}, errors.New("offset must be greater than or equal to 0")
 	}
@@ -412,7 +496,7 @@ func fitAIInsightsInitialPayloadDetails(payload cachedAIInsightsPayload, offset 
 	return newAIInsightsInitialPayloadDetails(payload, offset, content), nil
 }
 
-func newAIInsightsInitialPayloadDetails(payload cachedAIInsightsPayload, offset int, content string) aiInsightsInitialPayloadDetails {
+func newAIInsightsInitialPayloadDetails(payload aiInsightsPayload, offset int, content string) aiInsightsInitialPayloadDetails {
 	end := offset + len(content)
 	details := aiInsightsInitialPayloadDetails{
 		aiInsightsPayloadDetails: aiInsightsPayloadDetails{
@@ -454,7 +538,7 @@ func ensureJSONSizeAtMost(value any, maxBytes int) error {
 }
 
 func newAIInsightsBundleCache(maxBundles int) (*aiInsightsBundleCache, error) {
-	bundles, err := lru.New[string, []cachedAIInsightsPayload](maxBundles)
+	bundles, err := lru.New[string, []aiInsightsPayload](maxBundles)
 	if err != nil {
 		return nil, err
 	}
@@ -472,10 +556,10 @@ func (c *aiInsightsBundleCache) newBundleID(runID string) string {
 	return fmt.Sprintf("%s_%d", runID, c.nextID)
 }
 
-func (c *aiInsightsBundleCache) store(bundleID string, payloads []cachedAIInsightsPayload) {
+func (c *aiInsightsBundleCache) store(bundleID string, payloads []aiInsightsPayload) {
 	c.bundles.Add(bundleID, payloads)
 }
 
-func (c *aiInsightsBundleCache) get(bundleID string) ([]cachedAIInsightsPayload, bool) {
+func (c *aiInsightsBundleCache) get(bundleID string) ([]aiInsightsPayload, bool) {
 	return c.bundles.Get(bundleID)
 }

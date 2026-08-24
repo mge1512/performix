@@ -28,21 +28,24 @@ import (
 /* ---------- Test Doubles ---------- */
 
 type FakeToolInstance struct {
-	ctx           *IntegrationContext
-	done          chan struct{}
-	once          sync.Once
-	ProbeCalled   atomic.Bool
-	Ran           atomic.Bool
-	Reformatted   atomic.Bool
-	Stopped       atomic.Bool
-	Cancelled     atomic.Bool
-	immediateExit bool
-	probeError    error
-	runError      error
-	cancelError   error
-	stopError     error
-	reformatError error
-	running       *sync.WaitGroup // Signalled when Run is called
+	ctx                       *IntegrationContext
+	done                      chan struct{}
+	once                      sync.Once
+	collectionFinished        chan struct{}
+	collectionFinishedOnce    sync.Once
+	reportsCollectionFinished bool
+	ProbeCalled               atomic.Bool
+	Ran                       atomic.Bool
+	Reformatted               atomic.Bool
+	Stopped                   atomic.Bool
+	Cancelled                 atomic.Bool
+	immediateExit             bool
+	probeError                error
+	runError                  error
+	cancelError               error
+	stopError                 error
+	reformatError             error
+	running                   *sync.WaitGroup // Signalled when Run is called
 }
 
 // Option for configuring FakeToolInstance
@@ -52,6 +55,9 @@ func NewFakeToolInstance(opts ...FakeToolOption) *FakeToolInstance {
 	f := &FakeToolInstance{done: make(chan struct{})}
 	for _, opt := range opts {
 		opt(f)
+	}
+	if f.reportsCollectionFinished {
+		f.collectionFinished = make(chan struct{})
 	}
 	return f
 }
@@ -80,6 +86,10 @@ func WithStopError(err error) FakeToolOption {
 
 func WithReformatError(err error) FakeToolOption {
 	return func(f *FakeToolInstance) { f.reformatError = err }
+}
+
+func WithCollectionFinishReporting() FakeToolOption {
+	return func(f *FakeToolInstance) { f.reportsCollectionFinished = true }
 }
 
 func (f *FakeToolInstance) Properties() IntegrationProperties {
@@ -129,6 +139,14 @@ func (f *FakeToolInstance) Cancel() error {
 func (f *FakeToolInstance) Reformat() error {
 	f.Reformatted.Store(true)
 	return f.reformatError
+}
+
+func (f *FakeToolInstance) CollectionFinished() <-chan struct{} {
+	return f.collectionFinished
+}
+
+func (f *FakeToolInstance) NotifyCollectionFinished() {
+	f.collectionFinishedOnce.Do(func() { close(f.collectionFinished) })
 }
 
 type FakeToolFactory struct {
@@ -553,15 +571,27 @@ func TestTimeoutFallback(t *testing.T) {
 	t.Cleanup(func() { timeoutFallbackGracePeriod = originalGracePeriod })
 
 	t.Run("Fallback stop is requested when tool hangs past timeout", func(t *testing.T) {
-		timeoutFallbackGracePeriod = time.Millisecond
+		timeoutFallbackGracePeriod = 100 * time.Millisecond
 
 		inst := NewFakeToolInstance() // blocks in Run() until Stop/Cancel
-		stopCh := make(chan struct{})
-		cancelCh := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- RunToolIntegration(
+				context.Background(),
+				make(chan struct{}),
+				make(chan struct{}),
+				100*time.Millisecond,
+				inst,
+			)
+		}()
 
-		err := RunToolIntegration(context.Background(), stopCh, cancelCh, time.Millisecond, inst)
+		select {
+		case err := <-done:
+			require.Failf(t, "tool stopped before timeout plus grace period", "RunToolIntegration returned %v", err)
+		case <-time.After(150 * time.Millisecond):
+		}
 
-		assert.NoError(t, err)
+		assert.NoError(t, <-done)
 		assertFlags(t, inst, expectedFlags{ran: true, stopped: true})
 	})
 
@@ -580,13 +610,19 @@ func TestTimeoutFallback(t *testing.T) {
 	t.Run("Zero timeout; no fallback timer started; tool stops via stop channel", func(t *testing.T) {
 		inst := NewFakeToolInstance()
 		stopCh := make(chan struct{})
-		cancelCh := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- RunToolIntegration(context.Background(), stopCh, make(chan struct{}), 0, inst)
+		}()
+
+		select {
+		case err := <-done:
+			require.Failf(t, "tool stopped despite having no timeout", "RunToolIntegration returned %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
 		close(stopCh)
 
-		// timeout=0: the else-branch of the stop goroutine is used and no timer is created.
-		err := RunToolIntegration(context.Background(), stopCh, cancelCh, 0, inst)
-
-		assert.NoError(t, err)
+		assert.NoError(t, <-done)
 		assertFlags(t, inst, expectedFlags{ran: true, stopped: true})
 	})
 
@@ -602,4 +638,44 @@ func TestTimeoutFallback(t *testing.T) {
 		assert.NoError(t, err)
 		assertFlags(t, inst, expectedFlags{ran: true, stopped: true})
 	})
+}
+
+func TestCollectionFinishedTimeout(t *testing.T) {
+	originalFallbackGracePeriod := timeoutFallbackGracePeriod
+	t.Cleanup(func() {
+		timeoutFallbackGracePeriod = originalFallbackGracePeriod
+	})
+
+	for _, timeout := range []time.Duration{0, time.Hour} {
+		t.Run(fmt.Sprintf("Timeout is armed after collection finishes with timeout %s", timeout), func(t *testing.T) {
+			timeoutFallbackGracePeriod = time.Millisecond
+
+			inst := NewFakeToolInstance(WithCollectionFinishReporting())
+			done := make(chan error, 1)
+			go func() {
+				done <- RunToolIntegration(
+					context.Background(),
+					make(chan struct{}),
+					make(chan struct{}),
+					timeout,
+					inst,
+				)
+			}()
+
+			select {
+			case err := <-done:
+				require.Failf(t, "tool stopped before collection finished", "RunToolIntegration returned %v", err)
+			case <-time.After(10 * time.Millisecond):
+			}
+
+			inst.NotifyCollectionFinished()
+			select {
+			case err := <-done:
+				assert.NoError(t, err)
+			case <-time.After(time.Second):
+				require.Fail(t, "collection-finished timeout did not stop tool")
+			}
+			assertFlags(t, inst, expectedFlags{ran: true, stopped: true})
+		})
+	}
 }

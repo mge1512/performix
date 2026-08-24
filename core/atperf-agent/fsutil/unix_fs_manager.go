@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/bmatcuk/doublestar"
@@ -148,6 +149,13 @@ func (fm *UnixFSManager) Chown(path string, owner string, recursive bool) error 
 
 // ListFiles returns information about the file at path, globs are expanded and all matching files are returned.
 func (*UnixFSManager) ListFiles(path string) []FileInfo {
+	if !containsGlobMeta(path) {
+		// doublestar.Glob enumerates the parent directory and suppresses
+		// filesystem errors. A concrete file can be accessible even when its
+		// parent cannot be enumerated, so inspect concrete paths directly.
+		return []FileInfo{getFileInfo(path)}
+	}
+
 	matches, err := doublestar.Glob(path)
 	if err != nil {
 		return []FileInfo{{Path: path, Error: err}}
@@ -157,41 +165,46 @@ func (*UnixFSManager) ListFiles(path string) []FileInfo {
 	}
 
 	infos := make([]FileInfo, len(matches))
-	var u *user.User
-	var g *user.Group
 	for i, match := range matches {
-		stat, err := os.Lstat(match)
-		if err != nil {
-			infos[i].Error = err
-			continue
-		}
-
-		sys := stat.Sys().(*syscall.Stat_t)
-
-		owner := ""
-		if u, infos[i].Error = user.LookupId(fmt.Sprint(sys.Uid)); infos[i].Error == nil {
-			owner = u.Username
-		}
-		group := ""
-		if g, infos[i].Error = user.LookupGroupId(fmt.Sprint(sys.Gid)); infos[i].Error == nil {
-			group = g.Name
-		}
-
-		atime, ctime := statTimes(sys)
-		infos[i] = FileInfo{
-			Path:  match,
-			IsDir: stat.IsDir(),
-			Size:  stat.Size(),
-			Mtime: stat.ModTime().UnixMilli(),
-			Atime: atime,
-			Ctime: ctime,
-			Owner: owner,
-			Group: group,
-			Mode:  uint32(stat.Mode().Perm()),
-		}
+		infos[i] = getFileInfo(match)
 	}
 
 	return infos
+}
+
+func containsGlobMeta(path string) bool {
+	return strings.ContainsAny(path, `*?[{\`)
+}
+
+func getFileInfo(path string) FileInfo {
+	stat, err := os.Lstat(path)
+	if err != nil {
+		return FileInfo{Path: path, Error: err}
+	}
+
+	sys := stat.Sys().(*syscall.Stat_t)
+
+	owner := ""
+	if u, lookupErr := user.LookupId(fmt.Sprint(sys.Uid)); lookupErr == nil {
+		owner = u.Username
+	}
+	group := ""
+	if g, lookupErr := user.LookupGroupId(fmt.Sprint(sys.Gid)); lookupErr == nil {
+		group = g.Name
+	}
+
+	atime, ctime := statTimes(sys)
+	return FileInfo{
+		Path:  path,
+		IsDir: stat.IsDir(),
+		Size:  stat.Size(),
+		Mtime: stat.ModTime().UnixMilli(),
+		Atime: atime,
+		Ctime: ctime,
+		Owner: owner,
+		Group: group,
+		Mode:  uint32(stat.Mode().Perm()),
+	}
 }
 
 func NewFSManager() FSManager {

@@ -94,6 +94,16 @@ var recipe = {
         defaultValue: false,
       },
     },
+    {
+      id: 'rich_data_capture',
+      required: false,
+      label: 'Collect rich data',
+      description: `Enables the collection of rich data from the target, which enables advanced filtering functionality after the run completes. This can significantly increase host storage usage and transfer time.`,
+      config: {
+        type: 'checkbox',
+        defaultValue: false,
+      },
+    },
   ],
   renderParameters: [
     {
@@ -147,30 +157,189 @@ var recipe = {
   ],
 };
 
-const defaultTelemetryCPUName = 'Neoverse-N1';
+const telemetrySpecificationUnavailableMessageCode =
+  'recipes.cpu_microarchitecture.TELEMETRY_SPECIFICATION_UNAVAILABLE';
+const softLockupRiskMessageCode =
+  'recipes.cpu_microarchitecture.SOFT_LOCKUP_RISK';
+const highCoreCountWarningThreshold = 100;
+
+/**
+ * @typedef {'none' | 'voluntary' | 'full' | 'lazy' | 'rt' | 'unknown'} PreemptionMode
+ */
+
+/**
+ * @param {string} kernelConfig
+ * @returns {PreemptionMode}
+ */
+function getConfiguredPreemptionMode(kernelConfig) {
+  const enabled = (option) =>
+    new RegExp(`^CONFIG_${option}=y$`, 'm').test(kernelConfig);
+
+  if (enabled('PREEMPT_RT')) {
+    return 'rt';
+  }
+  if (enabled('PREEMPT_NONE')) {
+    return 'none';
+  }
+  if (enabled('PREEMPT_VOLUNTARY')) {
+    return 'voluntary';
+  }
+  if (enabled('PREEMPT_LAZY')) {
+    return 'lazy';
+  }
+  if (enabled('PREEMPT')) {
+    return 'full';
+  }
+  return 'unknown';
+}
+
+/**
+ * @param {string} kernelCmdline
+ * @returns {PreemptionMode | undefined}
+ */
+function getPreemptionOverride(kernelCmdline) {
+  /** @type {PreemptionMode | undefined} */
+  let override;
+  for (const argument of kernelCmdline.trim().split(/\s+/)) {
+    const match = argument.match(/^preempt=(none|voluntary|full|lazy)$/);
+    if (match) {
+      override = /** @type {PreemptionMode} */ (match[1]);
+    }
+  }
+  return override;
+}
+
+/**
+ * @param {string} runtimePreemption
+ * @returns {PreemptionMode | undefined}
+ */
+function getRuntimePreemptionMode(runtimePreemption) {
+  const match = runtimePreemption.match(/\((none|voluntary|full|lazy)\)/);
+  return match ? /** @type {PreemptionMode} */ (match[1]) : undefined;
+}
+
+/**
+ * Determine the effective kernel preemption mode if possible
+ *
+ * @param {import("./docs/jsdocs").ReadyExecutionContext} context
+ * @returns {PreemptionMode}
+ */
+function detectEffectivePreemptionMode(context) {
+  let configResult;
+  try {
+    configResult = context.runCommand({
+      type: 'exec',
+      cmd: "grep -E '^CONFIG_PREEMPT(_[A-Z0-9_]+)?=y$' /boot/config-$(uname -r)",
+    });
+  } catch (_) {
+    return 'unknown';
+  }
+
+  if (configResult.ReturnCode !== 0) {
+    return 'unknown';
+  }
+
+  const configuredMode = getConfiguredPreemptionMode(configResult.Stdout);
+  if (!/^CONFIG_PREEMPT_DYNAMIC=y$/m.test(configResult.Stdout)) {
+    return configuredMode;
+  }
+
+  // Dynamic preemption can be changed after boot. Prefer the current runtime
+  // mode when debugfs is mounted, then fall back to the boot configuration.
+  try {
+    const debugfsResult = context.runCommand({
+      type: 'exec',
+      cmd: "grep -qsE '^[^ ]+ /sys/kernel/debug debugfs( |$)' /proc/mounts",
+    });
+
+    // If debugfs is mounted, then look for dynamic preemption using sudo
+    if (debugfsResult.ReturnCode === 0) {
+      const runtimeResult = context.runCommand({
+        type: 'exec',
+        cmd: 'cat /sys/kernel/debug/sched/preempt',
+        runAsAdmin: true,
+      });
+      if (runtimeResult.ReturnCode === 0) {
+        const runtimeMode = getRuntimePreemptionMode(runtimeResult.Stdout);
+        if (runtimeMode) {
+          return runtimeMode;
+        }
+      }
+    }
+  } catch (_) {
+    // Fall back to the kernel command line and configured default.
+  }
+
+  let cmdlineResult;
+  try {
+    cmdlineResult = context.runCommand({
+      type: 'exec',
+      cmd: "if [ -r /proc/cmdline ]; then tr ' ' '\\n' < /proc/cmdline | sed -n '/^preempt=/p'; else exit 1; fi",
+    });
+  } catch (_) {
+    return configuredMode;
+  }
+
+  if (cmdlineResult.ReturnCode !== 0) {
+    return configuredMode;
+  }
+
+  return getPreemptionOverride(cmdlineResult.Stdout) ?? configuredMode;
+}
+
+/**
+ * @param {import("./docs/jsdocs").ReadyExecutionContext} context
+ * @param {import("./docs/jsdocs").Workload} workload
+ * @returns {import("./docs/jsdocs").RecipeReadyAdvice | undefined}
+ */
+function getSoftLockupRiskAdvice(context, workload) {
+  const targetInfo = context.targetInfo();
+  const cpuCount = targetInfo.CPUs.length;
+  if (
+    targetInfo.Os.OSFamily.toLowerCase() !== 'linux' ||
+    workload.Type !== 'launch' ||
+    cpuCount < highCoreCountWarningThreshold
+  ) {
+    return undefined;
+  }
+
+  const preemptionMode = detectEffectivePreemptionMode(context);
+  if (preemptionMode !== 'none') {
+    return undefined;
+  }
+
+  return {
+    ToolName: '',
+    AdviceSeverity: 'warning',
+    MessageCode: softLockupRiskMessageCode,
+    Metadata: {},
+    Cause: '',
+  };
+}
+
+/**
+ * @param {import("./docs/jsdocs").ReadyExecutionContext | import("./docs/jsdocs").RunExecutionContext} context
+ */
+function getPrimaryCPUTelemetrySpecification(context) {
+  const cpuName = context.targetInfo().PrimaryCPUName;
+  return {
+    cpuName,
+    telemetrySpecification: context.getTelemetrySpecification(cpuName),
+  };
+}
 
 /**
  * @param {import("./docs/jsdocs").ReadyExecutionContext | import("./docs/jsdocs").RunExecutionContext} context
  */
 function getPMUSpec(context) {
-  const cpuName = context.targetInfo().PrimaryCPUName;
-  let telemetrySpecification = context.getTelemetrySpecification(cpuName);
-  if (!telemetrySpecification) {
-    context.logWarn(
-      `Unknown CPU "${cpuName}" defaulting to ${defaultTelemetryCPUName}`,
-    );
-    telemetrySpecification = context.getTelemetrySpecification(
-      defaultTelemetryCPUName,
-    );
-  }
-
-  if (!telemetrySpecification) {
+  const primaryCPUTelemetry = getPrimaryCPUTelemetrySpecification(context);
+  if (!primaryCPUTelemetry.telemetrySpecification) {
     throw new Error(
-      `Telemetry specification for ${defaultTelemetryCPUName} is unavailable`,
+      `Telemetry specification for ${primaryCPUTelemetry.cpuName} is unavailable`,
     );
   }
 
-  return JSON.parse(telemetrySpecification);
+  return JSON.parse(primaryCPUTelemetry.telemetrySpecification);
 }
 
 /**
@@ -219,6 +388,22 @@ function generateNeoprofConfig(workload, params) {
  * @param {import("./docs/jsdocs").ReadyExecutionContext} context
  */
 function readyCPUMicroarchitecture(context) {
+  const primaryCPUTelemetry = getPrimaryCPUTelemetrySpecification(context);
+  if (!primaryCPUTelemetry.telemetrySpecification) {
+    return {
+      status: 'error',
+      advice: [
+        {
+          ToolName: tool_name,
+          AdviceSeverity: 'error',
+          MessageCode: telemetrySpecificationUnavailableMessageCode,
+          Metadata: { cpuName: primaryCPUTelemetry.cpuName },
+          Cause: '',
+        },
+      ],
+    };
+  }
+
   let workload = context.getWorkload();
   let samplingFreq = context.getParameter('sampling_freq');
   let metricsGroup = getMetricsGroup(context);
@@ -228,12 +413,17 @@ function readyCPUMicroarchitecture(context) {
     sampling_frequency: samplingFreq,
     collect_java_stacks: context.getParameter('collect_java_stacks'),
     collect_dotnet_stacks: context.getParameter('collect_dotnet_stacks'),
+    rich_data_capture: context.getParameter('rich_data_capture'),
   };
 
   let tools = generateNeoprofConfig(workload, params);
   let toolResponses = context.probeTools(tools);
 
   let allAdvice = collectToolAdvice(tools, toolResponses);
+  const softLockupRiskAdvice = getSoftLockupRiskAdvice(context, workload);
+  if (softLockupRiskAdvice) {
+    allAdvice.push(softLockupRiskAdvice);
+  }
 
   return {
     status: toolStatusToRecipeStatus(allAdvice),
@@ -245,7 +435,17 @@ function readyCPUMicroarchitecture(context) {
  * @param {import("./docs/jsdocs").ReadyExecutionContext} context
  */
 function computeValidValues(context) {
-  const pmuSpec = getPMUSpec(context);
+  const primaryCPUTelemetry = getPrimaryCPUTelemetrySpecification(context);
+  if (!primaryCPUTelemetry.telemetrySpecification) {
+    return [];
+  }
+  const pmuSpec = JSON.parse(primaryCPUTelemetry.telemetrySpecification);
+
+  const valid_metrics_groups = new Set(
+    Object.values(pmuSpec.methodologies.topdown_methodology.metric_grouping)
+      .flat()
+      .map((metric_group) => metric_group.toLowerCase()),
+  );
 
   // Generate a list of unique metric groups from pmuSpec.methodologies.topdown_methodology.decision_tree.metrics
   // Include metrics.group and all items in metrics.next_items, as the main group is usually Topdown_L1,
@@ -257,7 +457,9 @@ function computeValidValues(context) {
     .metrics) {
     all_metrics_groups.add(item.group);
     for (let next_item of item.next_items) {
-      all_metrics_groups.add(next_item);
+      if (valid_metrics_groups.has(next_item.toLowerCase())) {
+        all_metrics_groups.add(next_item);
+      }
     }
   }
   all_metrics_groups = Array.from(all_metrics_groups);
@@ -283,6 +485,7 @@ function runCPUMicroarchitecture(context) {
     sampling_frequency: sampling_freq,
     collect_java_stacks: context.getParameter('collect_java_stacks'),
     collect_dotnet_stacks: context.getParameter('collect_dotnet_stacks'),
+    rich_data_capture: context.getParameter('rich_data_capture'),
   };
   context.runTools(generateNeoprofConfig(workload, params));
 }
@@ -329,11 +532,96 @@ const timeRangeFilter = {
   },
 };
 
+const processFilter = {
+  id: 'process',
+  type: 'process_filter',
+  title: 'Processes',
+  rendererId: 'processes_and_threads',
+  description: 'Include data from a selected process.',
+  parameterBindings: {
+    pid: 'filter_pid',
+    // changing pid should clear tid
+    tid: 'filter_tid',
+  },
+  config: {
+    data_source: {
+      tables: {
+        processes: [
+          { renderer_id: 'processes_and_threads', output: 'processes' },
+        ],
+      },
+    },
+    optionsQuery: {
+      dataSource: 'processes',
+      query:
+        'SELECT CAST(pid AS INTEGER) AS pid, name FROM __table__ ORDER BY pid',
+      tableNamePlaceholder: '__table__',
+    },
+  },
+};
+
+const threadFilter = {
+  id: 'thread',
+  type: 'thread_filter',
+  title: 'Threads',
+  rendererId: 'processes_and_threads',
+  description: 'Include data from a selected thread.',
+  parameterBindings: {
+    // the process selected by `processFilter` is an input to thread filtering
+    // as only a thread from that process can be selected
+    pid: 'filter_pid',
+    tid: 'filter_tid',
+  },
+  config: {
+    data_source: {
+      tables: {
+        threads: [{ renderer_id: 'processes_and_threads', output: 'threads' }],
+      },
+    },
+    optionsQuery: {
+      dataSource: 'threads',
+      query:
+        'SELECT CAST(pid AS INTEGER) AS pid, CAST(tid AS INTEGER) AS tid, name FROM __table__ ORDER BY pid, tid',
+      tableNamePlaceholder: '__table__',
+    },
+  },
+};
+
+function enableFilterIfAvailable(filter, runDescription) {
+  // Treat a missing parameter as disabled; only an explicit true enables time-range filtering.
+  const richDataCaptureEnabled =
+    runDescription.Parameters.rich_data_capture === true;
+
+  if (!richDataCaptureEnabled) {
+    return {
+      ...filter,
+      disabled: {
+        reason:
+          'Global filtering is unavailable for this run. Re-run the recipe with "Collect rich data" enabled.',
+      },
+    };
+  }
+  if (!runDescription.IsRunPhaseTwoComplete) {
+    return {
+      ...filter,
+      disabled: {
+        reason: runDescription.IsRunInProgress
+          ? 'Unavailable until all capture data has been retrieved from the target.'
+          : 'Unavailable because the run ended before all capture data was retrieved from the target.',
+      },
+    };
+  }
+  return filter;
+}
+
 /**
  * @param {import("./docs/jsdocs").RenderExecutionContext} context
  */
 function renderCPUMicroarchitecture(context) {
   const isComparison = context.getRunDescriptions().length === 2;
+
+  const filterPid = getRenderParameterIfExists(context, 'filter_pid');
+  const filterTid = getRenderParameterIfExists(context, 'filter_tid');
   const filterStartTimeNs = getRenderParameterIfExists(
     context,
     'filter_start_time_ns',
@@ -342,10 +630,8 @@ function renderCPUMicroarchitecture(context) {
     context,
     'filter_end_time_ns',
   );
-  const timeRangeNoDataMessage =
-    filterStartTimeNs !== null || filterEndTimeNs !== null
-      ? 'No samples match the selected time range. Try widening or clearing the time range filter.'
-      : null;
+  let noDataMessageConfig = {};
+
   let renderers = [];
   let visualizations = [];
 
@@ -479,6 +765,14 @@ function renderCPUMicroarchitecture(context) {
   const dataSource = isComparison ? dataSourceComparison : dataSourceSingle;
   const sourceFiles = isComparison ? sourceFilesComparison : sourceFilesSingle;
   const disassembly = isComparison ? disassemblyComparison : disassemblySingle;
+  const slAnalyzeRerenderDependency = [{ renderer_id: 'sl_analyze' }];
+  let isSlAnalyzeRerendering = false;
+
+  function withSlAnalyzeRerenderDependency(dataSource) {
+    return isSlAnalyzeRerendering
+      ? { ...dataSource, renderers: slAnalyzeRerenderDependency }
+      : dataSource;
+  }
 
   const dataSourceCompareDrilldownStacks = {
     tables: {
@@ -546,31 +840,41 @@ function renderCPUMicroarchitecture(context) {
     },
   };
 
-  const topBarFilters = [];
+  const filters = [];
   if (context.isRerenderingEnabled() && !isComparison) {
-    const filterPid = getRenderParameterIfExists(context, 'filter_pid');
-    const filterTid = getRenderParameterIfExists(context, 'filter_tid');
     const slAnalyzeConfig = { entity: `tool/${tool_name}/0/` };
-    if (filterPid !== null && Number.isFinite(filterPid) && filterPid > 0) {
-      slAnalyzeConfig.filter_pid = filterPid;
-    }
-    if (filterTid !== null && Number.isFinite(filterTid) && filterTid > 0) {
+    let isFiltering = false;
+    if (filterTid !== null && Number.isFinite(filterTid)) {
       slAnalyzeConfig.filter_tid = filterTid;
+      isFiltering = true;
+    } else if (filterPid !== null && Number.isFinite(filterPid)) {
+      slAnalyzeConfig.filter_pid = filterPid;
+      isFiltering = true;
     }
     if (
       filterStartTimeNs !== null &&
       Number.isFinite(filterStartTimeNs) &&
       filterStartTimeNs >= 0
     ) {
-      slAnalyzeConfig.filter_start_time_ns = filterStartTimeNs;
+      slAnalyzeConfig.filter_start_time_ns = Math.round(filterStartTimeNs);
+      isFiltering = true;
     }
     if (
       filterEndTimeNs !== null &&
       Number.isFinite(filterEndTimeNs) &&
       filterEndTimeNs >= 0
     ) {
-      slAnalyzeConfig.filter_end_time_ns = filterEndTimeNs;
+      slAnalyzeConfig.filter_end_time_ns = Math.round(filterEndTimeNs);
+      isFiltering = true;
     }
+
+    if (isFiltering) {
+      noDataMessageConfig = {
+        noDataMessage:
+          'No samples match the selected filter values. Try loosening or clearing filters.',
+      };
+    }
+
     renderers.push(
       {
         type: 'SlAnalyzeRenderer',
@@ -588,21 +892,21 @@ function renderCPUMicroarchitecture(context) {
         config: { entity: `tool/${tool_name}/0/` },
       },
     );
-    if (!context.getRunDescriptions()[0].IsRunPhaseTwoComplete) {
-      timeRangeFilter.disabled = {
-        reason: context.getRunDescriptions()[0].IsRunInProgress
-          ? 'Unavailable until all capture data has been retrieved from the target.'
-          : 'Unavailable because the run ended before all capture data was retrieved from the target.',
-      };
-    }
-    topBarFilters.push(timeRangeFilter);
+    isSlAnalyzeRerendering = true;
+    const runDescription = context.getRunDescriptions()[0];
+    filters.push(enableFilterIfAvailable(timeRangeFilter, runDescription));
+    filters.push(enableFilterIfAvailable(processFilter, runDescription));
+    filters.push(enableFilterIfAvailable(threadFilter, runDescription));
   }
 
   renderers.push(
     {
       type: 'StreamlineAnalyzeSymbols',
       id: 'streamline_symbols',
-      config: { entity: `tool/${tool_name}/0/` },
+      config: {
+        entity: `tool/${tool_name}/0/`,
+        data_source: withSlAnalyzeRerenderDependency({}),
+      },
     },
     {
       type: 'TargetInfoRenderer',
@@ -620,7 +924,7 @@ function renderCPUMicroarchitecture(context) {
             'relative-order-priority': 'higher',
           },
         ],
-        data_source: dataSource,
+        data_source: withSlAnalyzeRerenderDependency(dataSource),
         entity: `tool/${tool_name}/0/`,
       },
     },
@@ -628,7 +932,7 @@ function renderCPUMicroarchitecture(context) {
       type: 'StreamlineAnalyzeFunctionProfileRenderer2',
       id: 'drilldown',
       config: {
-        data_source: dataSource,
+        data_source: withSlAnalyzeRerenderDependency(dataSource),
         entity: `tool/${tool_name}/0/`,
       },
     },
@@ -636,7 +940,7 @@ function renderCPUMicroarchitecture(context) {
       type: 'SourceCodeAttribution',
       id: 'source_code_attribution',
       config: {
-        data_source: sourceFiles,
+        data_source: withSlAnalyzeRerenderDependency(sourceFiles),
         entity: `tool/${tool_name}/0/`,
       },
     },
@@ -645,7 +949,7 @@ function renderCPUMicroarchitecture(context) {
       id: 'disassembly',
       config: {
         entity: `tool/${tool_name}/0/`,
-        data_source: disassembly,
+        data_source: withSlAnalyzeRerenderDependency(disassembly),
       },
     },
   );
@@ -719,9 +1023,7 @@ function renderCPUMicroarchitecture(context) {
           description:
             'View a summary of frontend, backend, retiring, and bad speculation metrics.',
           config: {
-            ...(timeRangeNoDataMessage
-              ? { noDataMessage: timeRangeNoDataMessage }
-              : {}),
+            ...noDataMessageConfig,
             data_source: {
               tables: {
                 callstack: [{ renderer_id: 'drilldown', output: 'drilldown' }],
@@ -816,9 +1118,7 @@ function renderCPUMicroarchitecture(context) {
           title: 'Functions',
           description: 'Identify functions that consume the most CPU time.',
           config: {
-            ...(timeRangeNoDataMessage
-              ? { noDataMessage: timeRangeNoDataMessage }
-              : {}),
+            ...noDataMessageConfig,
             data_source: {
               tables: {
                 flatFunctions: [{ renderer_id: 'flat', output: 'drilldown' }],
@@ -899,9 +1199,7 @@ function renderCPUMicroarchitecture(context) {
           description:
             'Investigate performance metrics grouped by call path. This information helps you analyze where and how functions are used during execution as well as their costs.',
           config: {
-            ...(timeRangeNoDataMessage
-              ? { noDataMessage: timeRangeNoDataMessage }
-              : {}),
+            ...noDataMessageConfig,
             data_source: {
               tables: {
                 drilldown: [{ renderer_id: 'drilldown', output: 'drilldown' }],
@@ -949,14 +1247,11 @@ function renderCPUMicroarchitecture(context) {
       },
     );
   }
-  if (topBarFilters.length > 0) {
-    return {
-      renderers,
-      ui: {
-        visualizations,
-        top_bar_filters: topBarFilters,
-      },
-    };
-  }
-  return { renderers, visualizations };
+  return {
+    renderers,
+    ui: {
+      visualizations,
+      side_panel_filters: filters,
+    },
+  };
 }

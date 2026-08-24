@@ -131,11 +131,13 @@ func TestInitializeRenderers(t *testing.T) {
 			Configs: RendererConfigList{
 				{Name: "pending_renderer", ID: &rendererID},
 			},
-			DataSources: []map[string][]DataSource{
+			Dependencies: []Dependencies{
 				{
-					"input": {
-						staticDataSource{
-							table: TableRef{Name: "pending_input", Pending: true},
+					Tables: DataSourcesMap{
+						"input": {
+							staticDataSource{
+								table: TableRef{Name: "pending_input", Pending: true},
+							},
 						},
 					},
 				},
@@ -186,7 +188,7 @@ func TestInitializeRenderers(t *testing.T) {
 			Configs: RendererConfigList{
 				{Name: "pending_renderer", ID: &rendererID},
 			},
-			DataSources: []map[string][]DataSource{nil},
+			Dependencies: []Dependencies{{}},
 		}
 
 		initializeErrs, err := initializeRenderers(context.Background(), session, rendererSpec, RendererList{renderer}, []error{nil})
@@ -201,6 +203,133 @@ func TestInitializeRenderers(t *testing.T) {
 		require.Equal(t, outputComponent, info.ComponentType())
 		require.Equal(t, RendererIdentity{Index: 0, ID: &rendererID, Name: "pending_renderer"}, info.RendererIdentity())
 		require.Equal(t, []run.RunID{{Value: "runA"}}, info.AssociatedContent())
+	})
+
+	t.Run("skips initialize when direct renderer dependency failed", func(t *testing.T) {
+		session := newFakeSession([]string{"runA"})
+		upstreamID := "upstream-renderer-id"
+		dependentID := "dependent-renderer-id"
+		upstreamErr := errors.New("upstream failed")
+
+		upstream := &MockRenderer{}
+		upstream.On("GetInputSpec").Return(InputSpec{})
+		upstream.On("GetOutputSpec").Return(OutputSpec{})
+		upstream.On("Initialize", session, mock.Anything).Return(upstreamErr)
+		defer upstream.AssertExpectations(t)
+
+		dependent := &MockRenderer{}
+		dependent.On("GetInputSpec").Return(InputSpec{})
+		dependent.On("GetOutputSpec").Return(OutputSpec{})
+		defer dependent.AssertExpectations(t)
+
+		rendererSpec := RendererSpec{
+			Configs: RendererConfigList{
+				{Name: "upstream_renderer", ID: &upstreamID},
+				{Name: "dependent_renderer", ID: &dependentID},
+			},
+			Dependencies: []Dependencies{
+				{},
+				{Renderers: []RendererDependency{{RendererID: upstreamID}}},
+			},
+		}
+
+		initializeErrs, err := initializeRenderers(context.Background(), session, rendererSpec, RendererList{upstream, dependent}, []error{nil, nil})
+		require.NoError(t, err)
+		require.Len(t, initializeErrs, 2)
+		require.ErrorIs(t, initializeErrs[0], upstreamErr)
+		require.ErrorIs(t, initializeErrs[1], message.New(message.EngineRenderRendererspecRendererDependencyFailed))
+		require.ErrorIs(t, initializeErrs[1], upstreamErr)
+		require.NoError(t, message.ValidateMetadataPlaceholders(initializeErrs[1]))
+		dependent.AssertNotCalled(t, "Initialize", mock.Anything, mock.Anything)
+	})
+
+	t.Run("skips initialize when direct renderer dependency has not initialized", func(t *testing.T) {
+		session := newFakeSession([]string{"runA"})
+		upstreamID := "upstream-renderer-id"
+		dependentID := "dependent-renderer-id"
+
+		dependent := &MockRenderer{}
+		dependent.On("GetInputSpec").Return(InputSpec{})
+		dependent.On("GetOutputSpec").Return(OutputSpec{})
+		defer dependent.AssertExpectations(t)
+
+		rendererSpec := RendererSpec{
+			Configs: RendererConfigList{
+				{Name: "dependent_renderer", ID: &dependentID},
+				{Name: "upstream_renderer", ID: &upstreamID},
+			},
+			Dependencies: []Dependencies{
+				{Renderers: []RendererDependency{{RendererID: upstreamID}}},
+				{},
+			},
+		}
+
+		initializeErrs, err := initializeRenderers(context.Background(), session, rendererSpec, RendererList{dependent, nil}, []error{nil, nil})
+		require.NoError(t, err)
+		require.Len(t, initializeErrs, 2)
+		require.ErrorIs(t, initializeErrs[0], message.New(message.EngineRenderRendererspecRendererDependencyNotInitialized))
+		require.NoError(t, message.ValidateMetadataPlaceholders(initializeErrs[0]))
+		dependent.AssertNotCalled(t, "Initialize", mock.Anything, mock.Anything)
+	})
+
+	t.Run("emits pending outputs and skips initialize when direct renderer dependency is pending", func(t *testing.T) {
+		session := newFakeSession([]string{"runA"})
+		upstreamID := "upstream-renderer-id"
+		dependentID := "dependent-renderer-id"
+		upstreamOutputComponent := cdf.ComponentType{Name: "upstream_output", SchemaVersion: "1.0"}
+		dependentOutputComponent := cdf.ComponentType{Name: "dependent_output", SchemaVersion: "1.0"}
+
+		upstream := &MockRenderer{}
+		upstream.On("GetInputSpec").Return(InputSpec{})
+		upstream.On("GetOutputSpec").Return(OutputSpec{
+			PortList: PortList{
+				Ports: []PortSpec{
+					{Name: "upstream_output", ComponentType: upstreamOutputComponent},
+				},
+			},
+		})
+		upstream.On("Initialize", session, mock.Anything).Return(cdf.ErrComponentPending)
+		defer upstream.AssertExpectations(t)
+
+		dependent := &MockRenderer{}
+		dependent.On("GetInputSpec").Return(InputSpec{})
+		dependent.On("GetOutputSpec").Return(OutputSpec{
+			PortList: PortList{
+				Ports: []PortSpec{
+					{Name: "dependent_output", ComponentType: dependentOutputComponent},
+				},
+			},
+		})
+		defer dependent.AssertExpectations(t)
+
+		rendererSpec := RendererSpec{
+			Configs: RendererConfigList{
+				{Name: "upstream_renderer", ID: &upstreamID},
+				{Name: "dependent_renderer", ID: &dependentID},
+			},
+			Dependencies: []Dependencies{
+				{},
+				{Renderers: []RendererDependency{{RendererID: upstreamID}}},
+			},
+		}
+
+		initializeErrs, err := initializeRenderers(context.Background(), session, rendererSpec, RendererList{upstream, dependent}, []error{nil, nil})
+		require.NoError(t, err)
+		require.Len(t, initializeErrs, 2)
+		require.ErrorIs(t, initializeErrs[0], cdf.ErrComponentPending)
+		require.ErrorIs(t, initializeErrs[1], cdf.ErrComponentPending)
+		dependent.AssertNotCalled(t, "Initialize", mock.Anything, mock.Anything)
+
+		entries := session.Manifest().Entries()
+		require.Len(t, entries, 2)
+		components := map[cdf.ComponentType]*ManifestEntryInfo{}
+		for _, entry := range entries {
+			components[entry.Info().ComponentType()] = entry.Info()
+		}
+		require.True(t, components[upstreamOutputComponent].Pending())
+		require.Equal(t, RendererIdentity{Index: 0, ID: &upstreamID, Name: "upstream_renderer"}, components[upstreamOutputComponent].RendererIdentity())
+		require.True(t, components[dependentOutputComponent].Pending())
+		require.Equal(t, RendererIdentity{Index: 1, ID: &dependentID, Name: "dependent_renderer"}, components[dependentOutputComponent].RendererIdentity())
 	})
 }
 
@@ -264,7 +393,7 @@ func TestStartRenderSession(t *testing.T) {
 		)
 
 		require.Error(t, err)
-		require.ErrorContains(t, err, "creating data sources failed")
+		require.ErrorContains(t, err, "creating dependencies failed")
 		require.ErrorContains(t, err, "duplicate renderer ID")
 		require.Nil(t, session)
 		require.Nil(t, invocationErrors)
@@ -285,6 +414,33 @@ func TestStartRenderSession(t *testing.T) {
 					Name:       "renderer_b",
 					ID:         stringPtr("renderer-b"),
 					ConfigJSON: `{"data_source":{"tables":{"in":[{"renderer_id":"renderer-a","output":"out"}]}}}`,
+				},
+			},
+		)
+
+		require.NoError(t, err)
+		require.Nil(t, session)
+		require.Len(t, invocationErrors, 2)
+		for i := range 2 {
+			require.ErrorIs(t, invocationErrors[i], message.New(message.EngineRenderRendererspecRendererDependencyCycle))
+			require.NoError(t, message.ValidateMetadataPlaceholders(invocationErrors[i]))
+		}
+	})
+
+	t.Run("returns renderer spec errors from renderer dependency JSON as invocation errors", func(t *testing.T) {
+		session, invocationErrors, err := start(
+			t,
+			&MockRendererFactory{},
+			RendererConfigList{
+				{
+					Name:       "renderer_a",
+					ID:         stringPtr("renderer-a"),
+					ConfigJSON: `{"data_source":{"renderers":[{"renderer_id":"renderer-b"}]}}`,
+				},
+				{
+					Name:       "renderer_b",
+					ID:         stringPtr("renderer-b"),
+					ConfigJSON: `{"data_source":{"renderers":[{"renderer_id":"renderer-a"}]}}`,
 				},
 			},
 		)

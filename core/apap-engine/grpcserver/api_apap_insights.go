@@ -53,7 +53,7 @@ func getRunSummaryBundle(
 	ctx context.Context,
 	desc *run.RunDescription,
 	withRenderedRunContent func(context.Context, func(render.Session) error) error,
-	summarizersForRecipe func(string) (insights.RecipeRunSummarizers, error),
+	summarizersForRecipe func(string) insights.RecipeRunSummarizers,
 	bundleLimitBytes int,
 ) (*apapproto.RunSummaryBundleResponse, error) {
 	if desc.RunResult != string(run.RecipeSuccess) {
@@ -64,13 +64,10 @@ func getRunSummaryBundle(
 			})
 	}
 
-	summarizers, err := summarizersForRecipe(desc.RecipeName)
-	if err != nil {
-		return nil, err
-	}
+	summarizers := summarizersForRecipe(desc.RecipeName)
 
 	summaries := make([]insights.RunSummary, 0, len(summarizers.Unbudgeted)+len(summarizers.Budgeted))
-	err = withRenderedRunContent(ctx, func(session render.Session) error {
+	err := withRenderedRunContent(ctx, func(session render.Session) error {
 		for _, summarizer := range summarizers.Unbudgeted {
 			logger := logx.FromContext(ctx).WithFields(log.Fields{
 				"runID":          desc.ID,

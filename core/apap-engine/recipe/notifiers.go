@@ -4,6 +4,8 @@
 package recipe
 
 import (
+	"sync"
+
 	"github.com/sirupsen/logrus"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/deploymentsupport"
@@ -19,8 +21,77 @@ func (n *NullStageNotifier) OnStageStart(stageInfo notifiers.StageInfo)         
 func (n *NullStageNotifier) OnStageEnd(stageInfo notifiers.StageInfo, err error) {}
 func (n *NullStageNotifier) OnStageProgress(stageInfo notifiers.StageInfo, stageProgress notifiers.StageProgress) {
 }
-func (n *NullStageNotifier) OnStageCancelled(stageInfo notifiers.StageInfo)      {}
-func (n *NullStageNotifier) OnRunCreated(runID run.RunID, rc *run.RunCollection) {}
+func (n *NullStageNotifier) OnStageCancelled(stageInfo notifiers.StageInfo)          {}
+func (n *NullStageNotifier) OnRunCreated(runID run.RunID, rc *run.RunCollection)     {}
+func (n *NullStageNotifier) OnRunMetadataChanged(reason run.RunMetadataUpdateReason) {}
+
+// BackgroundTransferDetachableNotifier stops forwarding notifications after Detach returns and suppresses background transfer notification.
+// Detach waits for any in-flight notification to complete.
+type BackgroundTransferDetachableNotifier struct {
+	mu       sync.Mutex
+	notifier notifiers.StageNotifier
+	detached bool
+}
+
+func NewBackgroundTransferDetachableNotifier(notifier notifiers.StageNotifier) *BackgroundTransferDetachableNotifier {
+	return &BackgroundTransferDetachableNotifier{notifier: notifier}
+}
+
+func (d *BackgroundTransferDetachableNotifier) Detach() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.detached = true
+}
+
+func (d *BackgroundTransferDetachableNotifier) notify(fn func(notifiers.StageNotifier)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.detached {
+		fn(d.notifier)
+	}
+}
+
+// suppresses reports whether the notification is for the background transfer stage.
+// These notifications can start before phase 1 completes, so the notifier suppresses them immediately.
+func (d *BackgroundTransferDetachableNotifier) suppresses(stageInfo notifiers.StageInfo) bool {
+	return stageInfo.Name == transferPhaseStageInfo(backgroundTransferPhase).Name
+}
+
+func (d *BackgroundTransferDetachableNotifier) OnStageStart(stageInfo notifiers.StageInfo) {
+	if d.suppresses(stageInfo) {
+		return
+	}
+	d.notify(func(n notifiers.StageNotifier) { n.OnStageStart(stageInfo) })
+}
+
+func (d *BackgroundTransferDetachableNotifier) OnStageEnd(stageInfo notifiers.StageInfo, err error) {
+	if d.suppresses(stageInfo) {
+		return
+	}
+	d.notify(func(n notifiers.StageNotifier) { n.OnStageEnd(stageInfo, err) })
+}
+
+func (d *BackgroundTransferDetachableNotifier) OnStageProgress(stageInfo notifiers.StageInfo, stageProgress notifiers.StageProgress) {
+	if d.suppresses(stageInfo) {
+		return
+	}
+	d.notify(func(n notifiers.StageNotifier) { n.OnStageProgress(stageInfo, stageProgress) })
+}
+
+func (d *BackgroundTransferDetachableNotifier) OnStageCancelled(stageInfo notifiers.StageInfo) {
+	if d.suppresses(stageInfo) {
+		return
+	}
+	d.notify(func(n notifiers.StageNotifier) { n.OnStageCancelled(stageInfo) })
+}
+
+func (d *BackgroundTransferDetachableNotifier) OnRunCreated(runID run.RunID, rc *run.RunCollection) {
+	d.notify(func(n notifiers.StageNotifier) { n.OnRunCreated(runID, rc) })
+}
+
+func (d *BackgroundTransferDetachableNotifier) OnRunMetadataChanged(reason run.RunMetadataUpdateReason) {
+	d.notify(func(n notifiers.StageNotifier) { n.OnRunMetadataChanged(reason) })
+}
 
 // CompositeStageNotifier dispatches stage notifications to multiple notifiers.
 type CompositeStageNotifier struct {
@@ -64,6 +135,13 @@ func (c *CompositeStageNotifier) OnStageCancelled(stageInfo notifiers.StageInfo)
 func (c *CompositeStageNotifier) OnRunCreated(runID run.RunID, rc *run.RunCollection) {
 	for _, n := range c.notifiers {
 		n.OnRunCreated(runID, rc)
+	}
+}
+
+// OnRunMetadataChanged calls OnRunMetadataChanged on all underlying notifiers.
+func (c *CompositeStageNotifier) OnRunMetadataChanged(reason run.RunMetadataUpdateReason) {
+	for _, n := range c.notifiers {
+		n.OnRunMetadataChanged(reason)
 	}
 }
 
@@ -120,6 +198,8 @@ func (l *LoggingStageNotifier) OnStageCancelled(stageInfo notifiers.StageInfo) {
 func (l *LoggingStageNotifier) OnRunCreated(runID run.RunID, rc *run.RunCollection) {
 	l.log.WithField("run_id", runID).Infof("New run created at '%s'", rc.GetRunPath(runID))
 }
+
+func (l *LoggingStageNotifier) OnRunMetadataChanged(reason run.RunMetadataUpdateReason) {}
 
 // ReadinessNotifier is called after a ready stage is executed, to store the output.
 type ReadinessNotifier interface {

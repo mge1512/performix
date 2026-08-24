@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/deploymentsupport"
@@ -320,6 +321,8 @@ func DescToProto(in *run.RunDescription) (*apapproto.RunDescription, error) {
 		Timeout:       in.Timeout,
 		RunResult:     in.RunResult,
 		RunError:      in.RunError,
+		SizeBytes:     in.SizeBytes,
+		SupportsStop:  proto.Bool(in.SupportsStop),
 	}
 	if in.WorkloadType == "Android Launch" {
 		meta.AndroidLaunchWorkload = &apapproto.AndroidLaunchWorkload{

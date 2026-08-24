@@ -8,6 +8,7 @@ const {
   ensureDeployed,
   probeWhl,
   posixTestWorkload,
+  resolveWorkloadPath,
   buildToolBundlePath,
 } = require('./utils');
 const { getExecutableFromWorkload } = require('./workload');
@@ -85,9 +86,6 @@ let tool = {
     );
     if (py.level !== 'ready') advice.push(py);
 
-    let od = await probeObjdump(engine);
-    if (od.level !== 'ready') advice.push(od);
-
     let whl = await probeWhl(engine, deployPath, tool.name);
     if (whl.level !== 'ready') advice.push(whl);
 
@@ -106,6 +104,9 @@ let tool = {
           messageCode: 'tool_integrations.instruction_mix.USE_SHELL',
           metadata: {},
         });
+      } else {
+        let err = await probeObjdump(engine, ctx.workload);
+        if (err.level !== 'ready') advice.push(err);
       }
     }
 
@@ -129,6 +130,13 @@ let tool = {
         code: 'tool_integrations.instruction_mix.USE_SHELL',
         metadata: {},
       };
+    } else {
+      let err = await probeObjdump(engine, ctx.workload);
+      if (err.level === 'error')
+        throw {
+          code: err.messageCode,
+          metadata: err.metadata,
+        };
     }
 
     const deployPath = await getDeployPath(ctx);
@@ -290,9 +298,10 @@ let tool = {
 /**
  * Checks that `objdump` exists (binutils).
  * @param {import("../recipes/docs/jsdocs").Engine} engine
+ * @param {import("../recipes/docs/jsdocs").Workload} workload
  * @returns {Promise<import("../recipes/docs/jsdocs").ProbeAdvice>}
  */
-async function probeObjdump(engine) {
+async function probeObjdump(engine, workload) {
   // Note we have to use "bash -c" instead of just running "objdump --version"
   // as execCommand will error if the command is not found. Should the agent have a "command exists" method?
   let odCheck = await engine.execCommand(
@@ -308,6 +317,28 @@ async function probeObjdump(engine) {
           'objdump is not available on the target machine. Install the binutils system package in order to run static instruction mix.',
       },
     };
+  }
+
+  const executable = getExecutableFromWorkload(workload.command);
+  const binaryPath = await resolveWorkloadPath(engine, executable);
+  const result = await engine.execCommand(['objdump', '-f', binaryPath], {
+    workingDirectory: workload.workingDir,
+  });
+  if (result.rc !== 0) {
+    if (result.stderr.includes('file format not recognized')) {
+      return {
+        level: 'error',
+        messageCode:
+          'tool_integrations.instruction_mix.UNSUPPORTED_FILE_FORMAT',
+      };
+    } else {
+      return {
+        level: 'warning',
+        messageCode:
+          'tool_integrations.instruction_mix.WORKLOAD_VALIDATION_FAILED',
+        metadata: { rc: result.rc },
+      };
+    }
   }
 
   return {

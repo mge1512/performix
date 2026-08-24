@@ -35,6 +35,7 @@ type RecipeCtx struct {
 	TargetName           string
 	ParamValues          parameters.BoundParameters
 	RenderParamValues    map[string]any
+	BoundRenderParams    *parameters.BoundRenderParameters
 	Timeout              uint32
 	ToolInvocationCounts map[string]int
 	toolCountLock        sync.Mutex

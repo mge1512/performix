@@ -79,10 +79,13 @@ To run only the production Performix MCP path:
 task core:test:eval:ai-insights -- --ai-modes performix_mcp
 ```
 
-Requested modes are run for every testcase selected by `--ai-act`.
-Known mode gaps should be represented with manifest expected-failure
-metadata rather than by hiding that mode from collection. Expected
-failures may be declared for a whole testcase:
+Requested modes are run for each selected testcase when the mode supports its
+recipe. REST and Hackathon MCP currently support Code Hotspots, so other
+recipes are not collected for those modes. Performix MCP is not restricted by
+recipe at this level.
+
+Expected failures describe known analysis failures within a supported mode and
+recipe combination. They may be declared for a whole testcase:
 
 ```json
 {
@@ -136,21 +139,57 @@ interpreter or refreshed dependencies.
 
 The suite defaults `--ai-prerecorded-run-cache` to
 `$HOME/.cache/performix/ai-insights-evaluation/pre-recorded-runs`. If
-you use a different directory, it must contain one subdirectory per
-testcase. The cache can also be set with
+you use a different directory, it must contain the subdirectories referenced
+by each testcase's `run_artifact`. Multiple testcases may intentionally
+reference the same fixture directory. The cache can also be set with
 `AI_INSIGHTS_PRERECORDED_RUN_CACHE`; the older
 `AI_INSIGHTS_RUN_ARTIFACT_BASE` name remains supported for existing
 scripts. Each testcase directory must contain:
 
 - `latest.zip`: the exported Performix run archive.
-- `test_src.zip`: source files fetched from sampled source IDs in the
-  run through `load_source_content`.
 - `metadata.json`: provenance for the pre-recorded run input.
+
+Modified testcases contain `run-modification-report.json`. This audit
+sidecar records how the exported source run was transformed and is uploaded
+with the pre-recorded artifact, but it is not exposed to the evaluation model.
+
+Code Hotspots, CPU Microarchitecture and dynamic-enabled Instruction Mix
+testcase directories must also contain `test_src.zip`, holding source files
+fetched from sampled source IDs in the run through `load_source_content`.
+ASCT, Syscall Trace, System Utilisation and static-only Instruction Mix do not
+use a source archive.
+The testcase recipe in `ai_insights_evaluation.json` selects the input handling;
+the recipe in `metadata.json` is checked as recording provenance.
 
 Per-test recipe parameters needed when creating `latest.zip`, such as
 managed-runtime stack collection flags, are defined in
-`ai_insights_evaluation.json`. `prerecord-run.py` applies those
-parameters automatically for the selected testcase.
+`ai_insights_evaluation.json`, together with the recipe and optional
+`prerecord` settings. The workflow resolves these values before invoking the
+workload-agnostic `prerecord-run.py` helper.
+
+Some recipes support an optional run modification that changes the exported
+archive during pre-recording. Set `run_modification` to a modification supported
+by the testcase's recipe.
+
+Available modifications by recipe:
+
+- `asct`:
+  - `core_to_core_latency_asymmetry`
+  - `low_peak_bandwidth`
+
+For example:
+
+```json
+{
+  "id": "test_case_01",
+  "recipe": "asct",
+  "run_modification": "low_peak_bandwidth"
+}
+```
+
+The modification produces the final `latest.zip` after the successful run is
+exported and before the external metadata is written. Unknown modifications and
+incompatible recipes are rejected before the recipe is run.
 
 Optional MCP performance thresholds are also defined per test. A testcase must
 specify all three thresholds in `ai_insights_evaluation.json` to enable its
@@ -167,6 +206,18 @@ performance assessment:
 }
 ```
 
+Set `mcp_prompt` on a testcase to override the default prompt for MCP modes:
+
+```json
+{
+  "id": "test_case_01",
+  "mcp_prompt": "Investigate why run {run_id} is not vectorising. Use Markdown."
+}
+```
+
+`{run_id}` is replaced with the imported run ID. The resolved prompt is saved
+as `codex_prompt.txt`. `mcp_prompt` is not supported in REST mode.
+
 Each manifest entry must define a non-empty `summary` field. Pytest
 uses this only when generating readable test item names; run artifact
 paths, imported run cache keys, result directories, and model prompts
@@ -175,15 +226,18 @@ exposed to the model under test. Summaries should use the form
 `<language> <description>`, for example `Cpp missing crc32c
 specialization`.
 
-The evaluation suite imports `latest.zip`, extracts `test_src.zip`
-under the results directory, and updates the imported run to use that
-extracted source tree. This avoids depending on source paths from the
-machine that runs pytest.
+For Code Hotspots, CPU Microarchitecture and dynamic-enabled Instruction Mix,
+the evaluation suite extracts `test_src.zip` under the results directory and
+updates the imported run to use that extracted source tree. This avoids
+depending on source paths from the machine that runs pytest. Static-only
+Instruction Mix, ASCT, Syscall Trace and System Utilisation import only the run
+archive.
 
-Pytest downloads missing `latest.zip`, `test_src.zip`, and metadata
-files for the selected testcases from
+Pytest downloads missing run inputs for the selected testcases from
 `its.apx-prerecorded-runs/ai-insights-evaluation` before checking the
-local input directory. Override that Artifactory path with
+local input directory. These are `latest.zip` and `metadata.json` for every
+supported recipe, plus `test_src.zip` for Code Hotspots, CPU Microarchitecture
+and dynamic-enabled Instruction Mix. Override that Artifactory path with
 `--ai-artifactory-run-base` or `AI_INSIGHTS_ARTIFACTORY_RUN_BASE` if
 needed. The download uses the same `ARTIFACTORY_API_TOKEN` environment
 variable as the other local Performix tooling. This keeps local and CI
@@ -200,6 +254,25 @@ and deliberately does not read or copy `~/.codex/auth.json`.
 Raw result directories contain the generated `codex_home`, including
 the per-attempt auth file. Remove that directory before sharing raw
 artefacts outside the local test environment.
+
+## Judging Saved Responses
+
+Use `judge_ai_insights_response.py` to evaluate existing LLM responses
+without rerunning the analysis agent or the full pytest suite. Pass the
+rubric followed by one or more response files:
+
+```bash
+cd core/scripts/ai-insights-evaluation
+.venv/bin/python judge_ai_insights_response.py \
+  rubrics/test_case_28.md \
+  results/test_case_28/performix_mcp/attempts/001/llm_response.md
+```
+
+The helper uses `OPENAI_API_KEY` and the same judge operation as the test
+suite. It defaults the test ID to the rubric filename and honours
+`AI_INSIGHTS_JUDGE_MODEL`. Pass `--test-id` or `--judge-model` to override
+those values. The command returns a non-zero exit status if any response
+fails.
 
 ## Running With Live Progress Logs
 
@@ -252,10 +325,12 @@ OpenAI Responses API. The per-test summary reports the value sent as
 manifest model config supplies the value.
 
 Pytest records the thresholds and resulting performance quality alongside the
-observed metrics in JUnit XML. The task uses `ai_insights_performance_report.py`
-to generate the same benchmark-reporting and dashboard data formats used in CI.
-Reports are generated even when pytest fails, provided pytest produced JUnit XML.
-The task preserves pytest's failure status after generating the reports.
+observed metrics in JUnit XML. At the end of the run, pytest generates quality,
+runtime, token and MCP graphs from the completed JUnit report. The task also uses
+`ai_insights_performance_report.py` to generate the same benchmark-reporting and
+dashboard data formats used in CI. Reporting outputs are generated even when
+tests fail, provided pytest produced JUnit XML. A reporting failure fails an
+otherwise successful run without replacing an existing pytest failure status.
 
 Local reporting outputs are written to:
 
@@ -263,16 +338,40 @@ Local reporting outputs are written to:
 - `results/reporting/payload/metadata.json`
 - `results/reporting/payload/reports/ai_insights_performance.json`
 - `results/reporting/ai-insights-performance-dashboard.json`
+- `results/reporting/graphs/index.html`
+- `results/reporting/graphs/observations.csv`
+
+Regenerate the graphs from an existing complete JUnit report with:
+
+```bash
+cd core/scripts/ai-insights-evaluation
+.venv/bin/python plot_ai_insights_junit.py \
+  results/reporting/ai-insights-evaluation.xml \
+  --output-dir results/reporting/graphs
+```
+
+The command includes every AI Insights mode present in the report. It creates
+SVG and PNG figures for quality, runtime, tokens, MCP call outcomes and MCP
+tool duration. It also writes the plotted observations to CSV and creates an
+HTML report at `results/reporting/graphs/index.html`.
+
+Each cost figure shows every testcase and connects matching modes. Repeated
+attempts are shown as ranges rather than being reduced to a single aggregate.
+When `performix_mcp` is present, relative-cost panels compare the other modes
+with the matching Performix MCP attempt.
 
 The reporting directory is replaced at the start of each invocation so stale
 JUnit data cannot be mistaken for the latest run.
 
 Recorded properties include the testcase id, mode, attempt number,
 attempt count, pass rate, imported run id, archive SHA256, agent
-duration, token counts, MCP call count, scores, judge labels, and paths
+duration, token counts, successful and failed MCP call counts and durations,
+scores, judge labels, and paths
 to the attempt artefacts such as `llm_response.md`, `score.md`,
-`score.json`, and `invoke_metadata.json`. For performance-evaluated attempts
-(i.e. in performix_mcp mode), they also include the performance thresholds
+`score.json`, and `invoke_metadata.json`. A call is counted as failed when
+Codex records either an MCP `Err` result or an MCP response with `isError` set.
+For performance-evaluated attempts (i.e. in performix_mcp mode), properties
+also include the performance thresholds
 and GOOD/POOR/INDETERMINABLE classification for runtime, input tokens, and
 output tokens. Suite-level properties record the model, reasoning effort,
 judge model, manifest path, and results directory once per pytest run.
@@ -315,4 +414,5 @@ Production Performix MCP mode writes the shared MCP artefacts:
 It validates that Codex completed the production `generate_ai_insights`
 tool call. If the generated evidence bundle is paginated, Codex may also
 call `read_ai_insights_payload_details`; those calls are counted in the
-MCP call metrics.
+MCP call metrics. Failed auxiliary MCP calls are shown as warnings in the
+summary, but do not override the judge's assessment of the final response.
