@@ -37,6 +37,7 @@ class ResolveWorkloadsTests(unittest.TestCase):
             {row["recipe"] for row in matrix},
             {
                 "asct",
+                "cache_sharing",
                 "code_hotspots",
                 "cpu_microarchitecture",
                 "instruction_mix",
@@ -153,6 +154,7 @@ class ResolveWorkloadsTests(unittest.TestCase):
             "group: ${{ fromJson(needs.prepare-cases.outputs.groups) }}",
             workflow,
         )
+        self.assertIn("enable_spe: ${{ matrix.group.enable_spe }}", workflow)
         self.assertNotIn("inputs.instance_type", workflow)
         self.assertIn("dry_run: ${{ inputs.dry_run }}", workflow)
 

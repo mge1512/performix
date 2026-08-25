@@ -651,6 +651,42 @@
       "mcp_prompt": "Show me AI Insights for the core-to-core-latency benchmark in Performix run {run_id}. Use Markdown.",
       "run_modification": "core_to_core_latency_asymmetry",
       "recipe_params": ["default_benchmarks=true"]
+    },
+    {
+      "id": "test_case_63",
+      "summary": "Cpp false sharing between compact per-worker counters",
+      "recipe": "cache_sharing",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_63/latest.zip",
+      "rubric": "rubrics/test_case_63.md"
+    },
+    {
+      "id": "test_case_64",
+      "summary": "Cpp true sharing on a shared request counter",
+      "recipe": "cache_sharing",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_64/latest.zip",
+      "rubric": "rubrics/test_case_64.md"
+    },
+    {
+      "id": "test_case_65",
+      "summary": "Cpp simultaneous false and true sharing",
+      "recipe": "cache_sharing",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act1"],
+      "run_artifact": "test_case_65/latest.zip",
+      "rubric": "rubrics/test_case_65.md"
+    },
+    {
+      "id": "test_case_66",
+      "summary": "Cpp separated per-worker counters without material cache sharing",
+      "recipe": "cache_sharing",
+      "instance_type": "c8g.metal-24xl",
+      "acts": ["act2"],
+      "run_artifact": "test_case_66/latest.zip",
+      "rubric": "rubrics/test_case_66.md"
     }
   ]
 }

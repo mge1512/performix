@@ -103,13 +103,16 @@ func TestCPUMicroarchitectureOptionsAreEmptyWithoutTelemetry(t *testing.T) {
 	assert.Empty(t, stageContext.ParameterOptions.MultiSelectOptions[0])
 }
 
-func TestCodeHotspotsManagedStackParamsInToolConfigs(t *testing.T) {
+func TestCodeHotspotsParamsInToolConfigs(t *testing.T) {
 	tests := []struct {
 		os                  string
+		toolName            string
+		toolVersion         string
 		expectManagedStacks bool
 	}{
-		{os: "Android", expectManagedStacks: false},
-		{os: "Linux", expectManagedStacks: true},
+		{os: "Android", toolName: "neoprof", toolVersion: "1.1.0", expectManagedStacks: false},
+		{os: "Linux", toolName: "neoprof", toolVersion: "1.1.0", expectManagedStacks: true},
+		{os: "Windows", toolName: "wperf", toolVersion: "1.0.1", expectManagedStacks: false},
 	}
 
 	for _, test := range tests {
@@ -124,6 +127,7 @@ func TestCodeHotspotsManagedStackParamsInToolConfigs(t *testing.T) {
 			paramValues, err := parameters.BindRecipeParameters(map[string]any{
 				"collect_java_stacks":   true,
 				"collect_dotnet_stacks": true,
+				"sampling_freq":         "high",
 			}, parsedRecipe.Parameters, parsedRecipe.Name)
 			require.NoError(t, err)
 
@@ -131,7 +135,7 @@ func TestCodeHotspotsManagedStackParamsInToolConfigs(t *testing.T) {
 				ParamValues:      paramValues,
 				ResolvedWorkload: &tool.WorkloadLaunch{RawCommand: "com.example/com.example.MainActivity", Command: []string{"com.example/com.example.MainActivity"}},
 				RecipeMetadata:   recipe.RecipeMetadata{Name: parsedRecipe.Name},
-				ToolVersions:     map[string]string{"neoprof": "1.1.0"},
+				ToolVersions:     map[string]string{test.toolName: test.toolVersion},
 			}
 			execCtx := newMockExecutionContext(t, recipeCtx, &target.Description{
 				Os: target.OsInfo{OSFamily: test.os},
@@ -140,29 +144,35 @@ func TestCodeHotspotsManagedStackParamsInToolConfigs(t *testing.T) {
 			execCtx.On("ToolsDir").Return("/data/local/tmp/ArmPerformix/tools")
 			execCtx.On("IsFullCaptureSupportEnabled").Return(false)
 			execCtx.On("IsNeoprofTimelineEnabled").Return(false)
-			hasExpectedManagedStackParams := mock.MatchedBy(func(contexts []tool.IntegrationContext) bool {
+			hasExpectedParams := mock.MatchedBy(func(contexts []tool.IntegrationContext) bool {
 				if len(contexts) != 1 {
 					return false
 				}
+				if contexts[0].Name != test.toolName {
+					return false
+				}
 				params := contexts[0].Params
+				if params["mode"] != "samples" || params["sampling_frequency"] != "high" {
+					return false
+				}
 				javaStacks, hasJavaStacks := params["collect_java_stacks"]
 				dotnetStacks, hasDotnetStacks := params["collect_dotnet_stacks"]
 				if test.expectManagedStacks {
-					return params["mode"] == "samples" && hasJavaStacks && javaStacks == true && hasDotnetStacks && dotnetStacks == true
+					return hasJavaStacks && javaStacks == true && hasDotnetStacks && dotnetStacks == true
 				}
-				return params["mode"] == "samples" && !hasJavaStacks && !hasDotnetStacks
+				return !hasJavaStacks && !hasDotnetStacks
 			})
 			execCtx.On(
 				"ProbeToolsFromIntegrations",
 				mock.Anything,
 				mock.Anything,
-				hasExpectedManagedStackParams,
+				hasExpectedParams,
 			).Return([]tool.ProbeResult{{Available: true}}, []error(nil))
 			execCtx.On(
 				"RunToolIntegrations",
 				mock.Anything,
 				mock.Anything,
-				hasExpectedManagedStackParams,
+				hasExpectedParams,
 			).Return(func() {}, []error(nil))
 
 			readyStage := &stages.CustomRecipeStage{

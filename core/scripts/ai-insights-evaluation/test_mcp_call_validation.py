@@ -13,6 +13,7 @@ import pytest
 from test_ai_insights_evaluation import (
     McpServer,
     codex_truncation_markers,
+    mcp_mode_env,
     should_fail_on_tool_output_truncation,
     validate_mcp_call,
 )
@@ -36,6 +37,12 @@ def _write_events(path: Path, *items: dict) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_performix_mcp_enables_experimental_recipes() -> None:
+    assert mcp_mode_env(MODE, {}) == {
+        "APXD_ENABLE_EXPERIMENTAL_RECIPES": "true"
+    }
 
 
 def test_auxiliary_tool_failure_does_not_invalidate_attempt(

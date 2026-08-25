@@ -412,7 +412,9 @@ function runHotspots(context) {
   const windowsTarget = isWindowsTarget(targetInfo);
 
   if (windowsTarget) {
-    context.runTools(generateWperfConfig(workload, buildWperfParams()));
+    context.runTools(
+      generateWperfConfig(workload, buildWperfParams(samplingFreq)),
+    );
     return;
   }
 

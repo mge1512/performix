@@ -5,6 +5,7 @@ import pytest
 
 from recipe_support import (
     ASCT_RECIPE,
+    CACHE_SHARING_RECIPE,
     CODE_HOTSPOTS_RECIPE,
     CPU_MICROARCHITECTURE_RECIPE,
     INSTRUCTION_MIX_RECIPE,
@@ -28,6 +29,12 @@ def test_cpu_microarchitecture_requires_source_archive() -> None:
     assert not mode_supports_recipe("hackathon_mcp", CPU_MICROARCHITECTURE_RECIPE)
 
 
+def test_cache_sharing_is_production_mcp_only() -> None:
+    assert mode_supports_recipe("performix_mcp", CACHE_SHARING_RECIPE)
+    assert not mode_supports_recipe("rest", CACHE_SHARING_RECIPE)
+    assert not mode_supports_recipe("hackathon_mcp", CACHE_SHARING_RECIPE)
+
+
 def test_instruction_mix_source_archive_requirement_depends_on_mode() -> None:
     assert requires_source_archive(INSTRUCTION_MIX_RECIPE)
     assert requires_source_archive(INSTRUCTION_MIX_RECIPE, ["mode=dynamic"])
@@ -43,11 +50,16 @@ def test_source_query_is_optional_for_other_recipes() -> None:
 
 
 def test_sampled_source_weight_uses_recipe_schema() -> None:
-    row = {"periodic_samples": 100, "self_samples": 200}
+    row = {
+        "periodic_samples": 100,
+        "self_samples": 200,
+        "cache_sharing_samples": 300,
+    }
 
     assert sampled_source_weight(CODE_HOTSPOTS_RECIPE, row) == 100
     assert sampled_source_weight(CPU_MICROARCHITECTURE_RECIPE, row) == 100
     assert sampled_source_weight(INSTRUCTION_MIX_RECIPE, row) == 200
+    assert sampled_source_weight(CACHE_SHARING_RECIPE, row) == 300
     with pytest.raises(ValueError, match="source weights are not supported"):
         sampled_source_weight("system_utilization", row)
 

@@ -153,7 +153,7 @@ Modified testcases contain `run-modification-report.json`. This audit
 sidecar records how the exported source run was transformed and is uploaded
 with the pre-recorded artifact, but it is not exposed to the evaluation model.
 
-Code Hotspots, CPU Microarchitecture and dynamic-enabled Instruction Mix
+Code Hotspots, CPU Microarchitecture, Cache Sharing and dynamic-enabled Instruction Mix
 testcase directories must also contain `test_src.zip`, holding source files
 fetched from sampled source IDs in the run through `load_source_content`.
 ASCT, Syscall Trace, System Utilisation and static-only Instruction Mix do not
@@ -226,7 +226,7 @@ exposed to the model under test. Summaries should use the form
 `<language> <description>`, for example `Cpp missing crc32c
 specialization`.
 
-For Code Hotspots, CPU Microarchitecture and dynamic-enabled Instruction Mix,
+For Code Hotspots, CPU Microarchitecture, Cache Sharing and dynamic-enabled Instruction Mix,
 the evaluation suite extracts `test_src.zip` under the results directory and
 updates the imported run to use that extracted source tree. This avoids
 depending on source paths from the machine that runs pytest. Static-only
@@ -236,8 +236,8 @@ archive.
 Pytest downloads missing run inputs for the selected testcases from
 `its.apx-prerecorded-runs/ai-insights-evaluation` before checking the
 local input directory. These are `latest.zip` and `metadata.json` for every
-supported recipe, plus `test_src.zip` for Code Hotspots, CPU Microarchitecture
-and dynamic-enabled Instruction Mix. Override that Artifactory path with
+supported recipe, plus `test_src.zip` for Code Hotspots, CPU Microarchitecture,
+Cache Sharing and dynamic-enabled Instruction Mix. Override that Artifactory path with
 `--ai-artifactory-run-base` or `AI_INSIGHTS_ARTIFACTORY_RUN_BASE` if
 needed. The download uses the same `ARTIFACTORY_API_TOKEN` environment
 variable as the other local Performix tooling. This keeps local and CI

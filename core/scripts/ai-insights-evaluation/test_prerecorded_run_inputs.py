@@ -102,11 +102,12 @@ def test_code_hotspots_requires_source_archive_regardless_of_execution_mode(
     ]
 
 
-def test_cpu_microarchitecture_requires_source_archive(tmp_path: Path) -> None:
-    case_dir = write_common_inputs(tmp_path, "cpu_microarchitecture")
+@pytest.mark.parametrize("recipe", ["cpu_microarchitecture", "cache_sharing"])
+def test_sampled_recipe_requires_source_archive(tmp_path: Path, recipe: str) -> None:
+    case_dir = write_common_inputs(tmp_path, recipe)
 
     missing = harness._missing_run_artifacts_for_testcases(
-        [make_testcase("cpu_microarchitecture")], tmp_path
+        [make_testcase(recipe)], tmp_path
     )
 
     assert missing == [

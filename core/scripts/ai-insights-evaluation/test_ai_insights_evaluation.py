@@ -503,7 +503,7 @@ def mcp_mode_env(mode: McpServer, cfg: dict[str, Any]) -> dict[str, str]:
             "ATP_ENGINE_PORT": os.environ.get("ATP_ENGINE_PORT", "9000"),
         }
     if mode.id == PERFORMIX_MCP_MODE:
-        return {}
+        return {"APXD_ENABLE_EXPERIMENTAL_RECIPES": "true"}
     raise ValueError(f"unsupported AI Insights mode: {mode.id}")
 
 

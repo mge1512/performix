@@ -12,7 +12,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 sys.path.append(str(Path(__file__).resolve().parent))
-from recipe_support import resolve_prerecord_config, resolve_recipe
+from recipe_support import SPE_RECIPES, resolve_prerecord_config, resolve_recipe
 
 MANIFEST = Path(__file__).with_name("ai_insights_evaluation.json")
 SAFE_CASE_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
@@ -248,7 +248,11 @@ def main() -> int:
                 )
             grouped.setdefault(instance_type, []).append(case)
         output = [
-            {"instance_type": instance_type, "cases": grouped_cases}
+            {
+                "instance_type": instance_type,
+                "cases": grouped_cases,
+                "enable_spe": any(case["recipe"] in SPE_RECIPES for case in grouped_cases),
+            }
             for instance_type, grouped_cases in grouped.items()
         ]
     else:

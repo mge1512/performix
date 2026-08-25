@@ -14,6 +14,7 @@ import (
 func TestRecipes(t *testing.T) {
 	assert.Equal(t, []string{
 		ASCTRecipeName,
+		CacheSharingRecipeName,
 		CodeHotspotsRecipeName,
 		CPUMicroarchitectureRecipeName,
 		InstructionMixRecipeName,
@@ -27,6 +28,12 @@ func TestRecipes(t *testing.T) {
 	assert.Equal(t, MethodRunQuery, asct.Method)
 	assert.Contains(t, asct.Guidance, "Use `run_query`")
 	assert.Contains(t, asct.Guidance, "ASCT Query Guide")
+
+	cacheSharing, ok := ForRecipe(CacheSharingRecipeName)
+	require.True(t, ok)
+	assert.Equal(t, MethodRunQuery, cacheSharing.Method)
+	assert.Contains(t, cacheSharing.Guidance, "Use `run_query`")
+	assert.Contains(t, cacheSharing.Guidance, "Cache Sharing Query Guide")
 
 	codeHotspots, ok := ForRecipe(CodeHotspotsRecipeName)
 	require.True(t, ok)

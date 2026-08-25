@@ -213,18 +213,23 @@ def test_code_hotspots_prerecord_writes_source_archive(
     assert "--source" not in run_cli.call_args.args[0]
 
 
-def test_cpu_microarchitecture_prerecord_writes_source_archive(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    ("expected_recipe", "query_marker"),
+    [
+        ("cpu_microarchitecture", "periodic_samples"),
+        ("cache_sharing", "perf.c2c.samples"),
+    ],
+)
+def test_sampled_recipe_prerecord_writes_source_archive(
+    tmp_path: Path, monkeypatch, expected_recipe: str, query_marker: str
 ) -> None:
-    output_dir, run_cli = configure_run(
-        tmp_path, monkeypatch, "cpu_microarchitecture"
-    )
+    output_dir, run_cli = configure_run(tmp_path, monkeypatch, expected_recipe)
 
     def collect_sources(cli_bin, run_id, case_dir, recipe, query):
         archive = case_dir / "test_src.zip"
         archive.write_bytes(b"source")
-        assert recipe == "cpu_microarchitecture"
-        assert "periodic_samples" in query
+        assert recipe == expected_recipe
+        assert query_marker in query
         return archive
 
     monkeypatch.setattr(prerecord, "collect_sampled_sources", collect_sources)
