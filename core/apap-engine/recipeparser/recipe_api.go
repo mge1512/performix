@@ -78,25 +78,25 @@ type RunDescription struct {
 }
 
 type RunComponentDescription struct {
-	RelativePath  string        `json:"relativePath"`
-	FileName      string        `json:"fileName"`
-	ComponentType ComponentType `json:"componentType"`
+	RelativePath  string
+	FileName      string
+	ComponentType ComponentType
 }
 
 type ToolConfiguration struct {
-	Name     string            `json:"name"`
-	Params   map[string]any    `json:"params"`
-	Workload WorkloadArg       `json:"workload"`
-	Env      map[string]string `json:"env"`
+	Name     string
+	Params   map[string]interface{}
+	Workload WorkloadArg
+	Env      map[string]string
 }
 
 type RunToolConfigurationsArg struct {
-	ToolConfigs []ToolConfiguration `json:"toolConfigs"`
+	ToolConfigs []ToolConfiguration
 }
 
 type ToolInvocation struct {
-	ToolName        string `json:"toolName"`
-	InvocationIndex int    `json:"invocationIndex"`
+	ToolName        string
+	InvocationIndex int
 }
 
 // RecipeAPI defines the API functions that we expose to the JS runtime
@@ -240,20 +240,19 @@ func (r *ConcreteRecipeAPI) getToolCapabilities(call goja.FunctionCall) goja.Val
 		panic(r.vm.ToValue(err))
 	}
 
-	jsCapabilities := &ConcreteJSToolCapabilities{capabilities: capabilities}
 	result := r.vm.NewObject()
 	if err = result.Set("has", func(hasCall goja.FunctionCall) goja.Value {
-		return toolCapabilitiesMethodHas(hasCall, r, jsCapabilities)
+		return toolCapabilitiesMethodHas(hasCall, r, capabilities)
 	}); err != nil {
 		panic(r.vm.ToValue(err))
 	}
 	if err = result.Set("get", func(getCall goja.FunctionCall) goja.Value {
-		return toolCapabilitiesMethodGet(getCall, r, jsCapabilities)
+		return toolCapabilitiesMethodGet(getCall, r, capabilities)
 	}); err != nil {
 		panic(r.vm.ToValue(err))
 	}
 	if err = result.Set("list", func(listCall goja.FunctionCall) goja.Value {
-		return toolCapabilitiesMethodList(listCall, r, jsCapabilities)
+		return toolCapabilitiesMethodList(listCall, r, capabilities)
 	}); err != nil {
 		panic(r.vm.ToValue(err))
 	}

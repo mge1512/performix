@@ -379,7 +379,7 @@ func ExecuteFunction(
 func (ah *AsyncHelper) ExecuteScriptedFunction(
 	exec func(goja.FunctionCall) goja.Value,
 	vm *goja.Runtime,
-	args []goja.Value,
+	jsContext []goja.Value,
 	receiver goja.Value,
 ) (out goja.Value, err error) {
 	defer func() {
@@ -387,7 +387,7 @@ func (ah *AsyncHelper) ExecuteScriptedFunction(
 			err = fmt.Errorf("%v", r)
 		}
 	}()
-	out, err = ExecuteFunction(vm, exec, args, receiver)
+	out, err = ExecuteFunction(vm, exec, jsContext, receiver)
 	if err != nil {
 		if ex, ok := err.(*goja.Exception); ok {
 			err := ah.processGojaError(ex.Value().ToObject(vm))
@@ -401,15 +401,13 @@ func (ah *AsyncHelper) ExecuteScriptedFunction(
 	return out, nil
 }
 
-// CallScriptedFunction runs a bound JS function on the event loop and awaits
-// its return value when it is a promise.
+// CallScriptedFunction runs a bound JS function on the event loop.
+// The function may be asynchronous or synchronous.
 func (ah *AsyncHelper) CallScriptedFunction(stage func(goja.FunctionCall) goja.Value, args []goja.Value) (goja.Value, error) {
 	return ah.CallScriptedFunctionWithReceiver(stage, args, goja.Undefined())
 }
 
-// ExecuteScriptedFunctionOnLoopWithReceiver runs a bound JS function on the
-// event loop without awaiting its return value.
-func (ah *AsyncHelper) ExecuteScriptedFunctionOnLoopWithReceiver(stage func(goja.FunctionCall) goja.Value, args []goja.Value, receiver goja.Value) (goja.Value, error) {
+func (ah *AsyncHelper) CallScriptedFunctionWithReceiver(stage func(goja.FunctionCall) goja.Value, args []goja.Value, receiver goja.Value) (goja.Value, error) {
 	type result struct {
 		out goja.Value
 		err error
@@ -419,25 +417,15 @@ func (ah *AsyncHelper) ExecuteScriptedFunctionOnLoopWithReceiver(stage func(goja
 	ah.Loop.RunOnLoop(func(vm *goja.Runtime) {
 		out, err := ah.ExecuteScriptedFunction(stage, vm, args, receiver)
 		ch <- result{out: out, err: err}
+
 	})
 	res := <-ch
 
-	return res.out, res.err
-}
-
-// CallScriptedFunctionWithReceiver runs a bound JS function on the event loop
-// and awaits its return value when it is a promise.
-func (ah *AsyncHelper) CallScriptedFunctionWithReceiver(stage func(goja.FunctionCall) goja.Value, args []goja.Value, receiver goja.Value) (goja.Value, error) {
-	result, err := ah.ExecuteScriptedFunctionOnLoopWithReceiver(stage, args, receiver)
-	if err != nil {
-		return result, err
+	if res.err != nil {
+		return res.out, res.err
 	}
-	return ah.Await(result)
-}
 
-// Await waits for a promise to settle. Non-promise values are returned as-is.
-func (ah *AsyncHelper) Await(promise goja.Value) (goja.Value, error) {
-	return awaitPromise(ah.Ctx, ah, promise)
+	return awaitPromise(ah.Ctx, ah, res.out)
 }
 
 // Matches JS frames like:

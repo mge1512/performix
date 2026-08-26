@@ -665,7 +665,6 @@ message AndroidActivity {
 message AndroidPackage {
   string name = 1;
   repeated AndroidActivity activities = 2;
-  optional bool debuggable = 3;
 }
 
 message ListAndroidPackagesResponse {

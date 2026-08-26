@@ -455,6 +455,28 @@ const recipe = {
 		assert.Equal(t, versions.GetVersion(), recipeProp.Deployments[0].Dependencies[0].Version)
 	})
 
+	t.Run("Recipe status parsing rejects invalid explicit status", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			properties  Recipe
+			expectedErr string
+		}{
+			{
+				name:        "invalid explicit status",
+				properties:  Recipe{Status: "beta"},
+				expectedErr: `invalid recipe status "beta"`,
+			},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				actual, err := parseRecipeStatus(test.properties)
+				require.EqualError(t, err, test.expectedErr)
+				assert.Empty(t, actual)
+			})
+		}
+	})
+
 	t.Run("Recipe is parsed correctly and panics", func(t *testing.T) {
 		mockRecipeAPI := &MockRecipeAPI{}
 		apiFactory := func(

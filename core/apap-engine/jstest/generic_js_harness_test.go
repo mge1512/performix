@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/dop251/goja"
@@ -93,7 +92,7 @@ func TestGenericJSHarness(t *testing.T) {
 		harness := LoadJSModule(t, entryPath)
 		var destination result
 
-		err := harness.CallAwaitWithDest(t, "makeResult", &destination, "a", 1)
+		err := harness.CallWithDest(t, "makeResult", &destination, "a", 1)
 
 		require.NoError(t, err)
 		require.Equal(t, result{Name: "a", Count: 1}, destination)
@@ -224,6 +223,40 @@ func TestGenericJSHarness(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, int64(42), result)
 	})
+
+	t.Run("returns Message from structured JavaScript error", func(t *testing.T) {
+		metadata := map[string]string{
+			"deployPath": "/a",
+			"locality":   "target",
+			"tool":       "a",
+		}
+		entryPath := useTestJSFiles(t, map[string]string{
+			"entry.js": `
+				function fail() {
+					throw {
+						code: "tool_integrations.common.TOOL_NOT_DEPLOYED",
+						cause: "missing tool",
+						metadata: {
+							deployPath: "/a",
+							locality: "target",
+							tool: "a",
+						},
+					};
+				}
+			`,
+		})
+		harness := LoadJSScript(t, entryPath)
+		expectedErr := message.New(message.ToolIntegrationsCommonToolNotDeployed).
+			WithMetadata(metadata).
+			WithCause(errors.New("missing tool"))
+
+		result, err := harness.Call(t, "fail")
+
+		require.Nil(t, result)
+		require.Error(t, err)
+		require.Equal(t, expectedErr, err)
+		require.NoError(t, message.ValidateMetadataPlaceholders(expectedErr))
+	})
 }
 
 func TestCall(t *testing.T) {
@@ -235,24 +268,6 @@ func TestCall(t *testing.T) {
 		`)
 
 		result, err := harness.Call(t, "add", 20, 22)
-
-		require.NoError(t, err)
-		require.Equal(t, int64(42), result)
-	})
-
-	t.Run("optionally awaits promise", func(t *testing.T) {
-		harness := loadTestJSModule(t, `
-			module.exports = {
-				getValue: async () => 42,
-			};
-		`)
-
-		result, err := harness.Call(t, "getValue")
-
-		require.NoError(t, err)
-		require.IsType(t, (*goja.Promise)(nil), result)
-
-		result, err = harness.CallAwait(t, "getValue")
 
 		require.NoError(t, err)
 		require.Equal(t, int64(42), result)
@@ -324,40 +339,6 @@ func TestCall(t *testing.T) {
 		require.Equal(t, expectedErr, err)
 		require.NoError(t, message.ValidateMetadataPlaceholders(expectedErr))
 	})
-
-	t.Run("converts structured asynchronous JavaScript error into Message", func(t *testing.T) {
-		metadata := map[string]string{
-			"deployPath": "/a",
-			"locality":   "target",
-			"tool":       "a",
-		}
-		harness := loadTestJSModule(t, `
-			module.exports = {
-				fail: async () => {
-					await Promise.resolve();
-					throw {
-						code: "tool_integrations.common.TOOL_NOT_DEPLOYED",
-						cause: "missing tool",
-						metadata: {
-							deployPath: "/a",
-							locality: "target",
-							tool: "a",
-						},
-					};
-				},
-			};
-		`)
-		expectedErr := message.New(message.ToolIntegrationsCommonToolNotDeployed).
-			WithMetadata(metadata).
-			WithCause(errors.New("missing tool"))
-
-		result, err := harness.CallAwait(t, "fail")
-
-		require.Nil(t, result)
-		require.Error(t, err)
-		require.Equal(t, expectedErr, err)
-		require.NoError(t, message.ValidateMetadataPlaceholders(expectedErr))
-	})
 }
 
 func TestCallWithDest(t *testing.T) {
@@ -377,20 +358,6 @@ func TestCallWithDest(t *testing.T) {
 
 		require.NoError(t, err)
 		require.Equal(t, result{Name: "a", Count: 1}, destination)
-	})
-
-	t.Run("exports promise without awaiting", func(t *testing.T) {
-		harness := loadTestJSModule(t, `
-			module.exports = {
-				getValue: async () => 42,
-			};
-		`)
-		var destination any
-
-		err := harness.CallWithDest(t, "getValue", &destination)
-
-		require.NoError(t, err)
-		require.IsType(t, (*goja.Promise)(nil), destination)
 	})
 
 	t.Run("preserves Message without changing destination", func(t *testing.T) {
@@ -456,7 +423,7 @@ func TestPromiseConversions(t *testing.T) {
 		harness := loadPromiseHarness(t)
 		promise := harness.ToJSValPromise(t, "a", nil)
 
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
+		result, err := harness.Call(t, "awaitPromise", promise)
 
 		require.NoError(t, err)
 		require.Equal(t, "a", result)
@@ -466,7 +433,7 @@ func TestPromiseConversions(t *testing.T) {
 		harness := loadPromiseHarness(t)
 		promise := harness.ToJSValPromise(t, nil, errors.New("boom"))
 
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
+		result, err := harness.Call(t, "awaitPromise", promise)
 
 		requireRejectedWith(t, result, err, "boom")
 	})
@@ -475,7 +442,7 @@ func TestPromiseConversions(t *testing.T) {
 		harness := loadPromiseHarness(t)
 		promise := harness.ToJSOKPromise(t, nil)
 
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
+		result, err := harness.Call(t, "awaitPromise", promise)
 
 		require.NoError(t, err)
 		require.Equal(t, true, result)
@@ -485,7 +452,7 @@ func TestPromiseConversions(t *testing.T) {
 		harness := loadPromiseHarness(t)
 		promise := harness.ToJSOKPromise(t, errors.New("boom"))
 
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
+		result, err := harness.Call(t, "awaitPromise", promise)
 
 		requireRejectedWith(t, result, err, "boom")
 	})
@@ -508,7 +475,7 @@ func TestPromiseConversions(t *testing.T) {
 		require.Equal(t, goja.PromiseStatePending, promiseState(t, harness, promise))
 		release()
 
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
+		result, err := harness.Call(t, "awaitPromise", promise)
 
 		require.NoError(t, err)
 		require.Equal(t, "a", result)
@@ -532,24 +499,9 @@ func TestPromiseConversions(t *testing.T) {
 		require.Equal(t, goja.PromiseStatePending, promiseState(t, harness, promise))
 		release()
 
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
+		result, err := harness.Call(t, "awaitPromise", promise)
 
 		requireRejectedWith(t, result, err, "boom")
-	})
-
-	t.Run("custom promise executes callback and resolves its value", func(t *testing.T) {
-		harness := loadPromiseHarness(t)
-		var callbackCalls atomic.Int32
-		promise := harness.ToJSCustomPromise(t, func() (any, error) {
-			callbackCalls.Add(1)
-			return "a", nil
-		})
-
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
-
-		require.NoError(t, err)
-		require.Equal(t, "a", result)
-		require.Equal(t, int32(1), callbackCalls.Load())
 	})
 
 	t.Run("custom promise rejects callback error", func(t *testing.T) {
@@ -558,7 +510,7 @@ func TestPromiseConversions(t *testing.T) {
 			return nil, errors.New("boom")
 		})
 
-		result, err := harness.CallAwait(t, "awaitPromise", promise)
+		result, err := harness.Call(t, "awaitPromise", promise)
 
 		requireRejectedWith(t, result, err, "boom")
 	})

@@ -81,8 +81,56 @@ func newGenericJSHarness(
 // Harness calling methods
 // ------------------------
 
-// getFunction gets a named JavaScript function. The caller must hold gh.callMu.
-func (gh *GenericJSHarness) getFunction(t *testing.T, functionName string) (func(goja.FunctionCall) goja.Value, error) {
+// callFunction invokes a JavaScript function. The caller must hold gh.callMu.
+func (gh *GenericJSHarness) callFunction(
+	t *testing.T,
+	jsFunction func(goja.FunctionCall) goja.Value,
+	args ...any,
+) (goja.Value, error) {
+	t.Helper()
+	require.NotNil(t, jsFunction, "JavaScript function is nil")
+
+	var jsArgs []goja.Value
+	err := gh.asyncHelper.RunOnLoopBlock(func(vm *goja.Runtime) error {
+		jsArgs = make([]goja.Value, len(args))
+		for index, arg := range args {
+			jsArgs[index] = vm.ToValue(arg)
+		}
+
+		return nil
+	})
+	require.NoError(t, err, "failed to convert JavaScript function arguments")
+
+	receiver := goja.Undefined()
+
+	if gh.fileType == commonJSModule {
+		receiver = gh.exports
+	}
+
+	result, err := gh.asyncHelper.CallScriptedFunctionWithReceiver(
+		jsFunction,
+		jsArgs,
+		receiver,
+	)
+	if err == nil {
+		return result, nil
+	}
+
+	if msg := message.IsMessage(err); msg != nil {
+		return result, msg
+	}
+	if se, ok := err.(*gojautils.ScriptError); ok {
+		if message.CodeExists(se.Code, message.LocaleEnglish) {
+			// We have a valid message code, return a message error
+			return result, message.New(se.Code).WithMetadata(se.Metadata).WithCause(errors.New(tool_goja.CombineMessageAndStack(se.Cause, se.FormatStack())))
+		}
+	}
+
+	return result, err
+}
+
+// call invokes a named JavaScript function. The caller must hold gh.callMu.
+func (gh *GenericJSHarness) call(t *testing.T, functionName string, args ...any) (goja.Value, error) {
 	t.Helper()
 
 	var jsFunction func(goja.FunctionCall) goja.Value
@@ -119,154 +167,12 @@ func (gh *GenericJSHarness) getFunction(t *testing.T, functionName string) (func
 	})
 	require.NoError(t, err)
 
-	return jsFunction, nil
-}
-
-// callFunction invokes a JavaScript function. The caller must hold gh.callMu.
-func (gh *GenericJSHarness) callFunction(
-	t *testing.T,
-	jsFunction func(goja.FunctionCall) goja.Value,
-	args ...any,
-) (goja.Value, error) {
-	t.Helper()
-	require.NotNil(t, jsFunction, "JavaScript function is nil")
-
-	var jsArgs []goja.Value
-	err := gh.asyncHelper.RunOnLoopBlock(func(vm *goja.Runtime) error {
-		jsArgs = make([]goja.Value, len(args))
-		for index, arg := range args {
-			jsArgs[index] = vm.ToValue(arg)
-		}
-
-		return nil
-	})
-	require.NoError(t, err, "failed to convert JavaScript function arguments")
-
-	receiver := goja.Undefined()
-
-	if gh.fileType == commonJSModule {
-		receiver = gh.exports
-	}
-
-	result, err := gh.asyncHelper.ExecuteScriptedFunctionOnLoopWithReceiver(
-		jsFunction,
-		jsArgs,
-		receiver,
-	)
-	return gh.normalizeCallError(result, err)
-}
-
-func (gh *GenericJSHarness) normalizeCallError(result goja.Value, err error) (goja.Value, error) {
-	if err == nil {
-		return result, nil
-	}
-
-	if msg := message.IsMessage(err); msg != nil {
-		return result, msg
-	}
-	if se, ok := err.(*gojautils.ScriptError); ok {
-		if message.CodeExists(se.Code, message.LocaleEnglish) {
-			// We have a valid message code, return a message error
-			return result, message.New(se.Code).WithMetadata(se.Metadata).WithCause(errors.New(tool_goja.CombineMessageAndStack(se.Cause, se.FormatStack())))
-		}
-	}
-
-	return result, err
-}
-
-// callAwaitFunction invokes a JavaScript function and awaits its result. The
-// caller must hold gh.callMu.
-func (gh *GenericJSHarness) callAwaitFunction(
-	t *testing.T,
-	jsFunction func(goja.FunctionCall) goja.Value,
-	args ...any,
-) (goja.Value, error) {
-	t.Helper()
-
-	result, err := gh.callFunction(t, jsFunction, args...)
-	if err != nil {
-		return result, err
-	}
-	result, err = gh.asyncHelper.Await(result)
-	return gh.normalizeCallError(result, err)
-}
-
-func (gh *GenericJSHarness) call(
-	t *testing.T,
-	functionName string,
-	await bool,
-	args ...any,
-) (goja.Value, error) {
-	jsFunction, err := gh.getFunction(t, functionName)
-	if err != nil {
-		return nil, err
-	}
-
-	if await {
-		return gh.callAwaitFunction(t, jsFunction, args...)
-	}
 	return gh.callFunction(t, jsFunction, args...)
-}
-
-func (gh *GenericJSHarness) callAndExport(
-	t *testing.T,
-	functionName string,
-	await bool,
-	args ...any,
-) (any, error) {
-	t.Helper()
-
-	gh.callMu.Lock()
-	defer gh.callMu.Unlock()
-
-	result, err := gh.call(t, functionName, await, args...)
-
-	var exportedResult any
-	exportErr := gh.asyncHelper.RunOnLoopBlock(func(_ *goja.Runtime) error {
-		if result == nil || goja.IsUndefined(result) || goja.IsNull(result) {
-			exportedResult = nil
-		} else {
-			exportedResult = result.Export()
-		}
-
-		return nil
-	})
-	require.NoErrorf(t, exportErr, "failed to export result from JavaScript function %q", functionName)
-
-	return exportedResult, err
-}
-
-func (gh *GenericJSHarness) callAndExportTo(
-	t *testing.T,
-	functionName string,
-	destination any,
-	await bool,
-	args ...any,
-) error {
-	t.Helper()
-
-	gh.callMu.Lock()
-	defer gh.callMu.Unlock()
-
-	result, err := gh.call(t, functionName, await, args...)
-	if err != nil {
-		return err
-	}
-
-	err = gh.asyncHelper.RunOnLoopBlock(func(vm *goja.Runtime) error {
-		return vm.ExportTo(result, destination)
-	})
-	require.NoErrorf(t, err, "failed to export result from JavaScript function %q", functionName)
-
-	return nil
 }
 
 // Call calls the function with the specified function name and passes in the
 // provided arguments. It returns the exported return value of the function,
 // and any error thrown by the function.
-//
-// Call does not await promises. Use CallAwait when the function's resolved
-// value or rejection is required.
 //
 // Return values are exported using goja.Value.Export. Common conversions are:
 // - undefined and null to nil
@@ -284,14 +190,25 @@ func (gh *GenericJSHarness) callAndExportTo(
 // specific Go type.
 func (gh *GenericJSHarness) Call(t *testing.T, functionName string, args ...any) (any, error) {
 	t.Helper()
-	return gh.callAndExport(t, functionName, false, args...)
-}
 
-// CallAwait is equivalent to Call, but awaits the returned promise and exports
-// its resolved value.
-func (gh *GenericJSHarness) CallAwait(t *testing.T, functionName string, args ...any) (any, error) {
-	t.Helper()
-	return gh.callAndExport(t, functionName, true, args...)
+	gh.callMu.Lock()
+	defer gh.callMu.Unlock()
+
+	result, err := gh.call(t, functionName, args...)
+
+	var exportedResult any
+	exportErr := gh.asyncHelper.RunOnLoopBlock(func(_ *goja.Runtime) error {
+		if result == nil || goja.IsUndefined(result) || goja.IsNull(result) {
+			exportedResult = nil
+		} else {
+			exportedResult = result.Export()
+		}
+
+		return nil
+	})
+	require.NoErrorf(t, exportErr, "failed to export result from JavaScript function %q", functionName)
+
+	return exportedResult, err
 }
 
 // TODO: Go 1.27 will introduce generic methods - currently, only package-level
@@ -312,38 +229,26 @@ func (gh *GenericJSHarness) CallWithDest(
 	args ...any,
 ) error {
 	t.Helper()
-	return gh.callAndExportTo(t, functionName, destination, false, args...)
-}
 
-// CallAwaitWithDest is equivalent to CallWithDest, but awaits the returned
-// promise and exports its resolved value into destination.
-func (gh *GenericJSHarness) CallAwaitWithDest(
-	t *testing.T,
-	functionName string,
-	destination any,
-	args ...any,
-) error {
-	t.Helper()
-	return gh.callAndExportTo(t, functionName, destination, true, args...)
+	gh.callMu.Lock()
+	defer gh.callMu.Unlock()
+
+	result, err := gh.call(t, functionName, args...)
+	if err != nil {
+		return err
+	}
+
+	err = gh.asyncHelper.RunOnLoopBlock(func(vm *goja.Runtime) error {
+		return vm.ExportTo(result, destination)
+	})
+	require.NoErrorf(t, err, "failed to export result from JavaScript function %q", functionName)
+
+	return nil
 }
 
 // ------------------------
 // Helpers
 // ------------------------
-
-// ToJSValue converts a Go value into a goja.Value owned by this harness's
-// runtime. Use it when mocking a method which returns an immediate JS value.
-func (gh *GenericJSHarness) ToJSValue(t *testing.T, value any) goja.Value {
-	t.Helper()
-
-	var jsValue goja.Value
-	err := gh.asyncHelper.RunOnLoopBlock(func(vm *goja.Runtime) error {
-		jsValue = vm.ToValue(value)
-		return nil
-	})
-	require.NoError(t, err)
-	return jsValue
-}
 
 // ToJSValPromise takes a value and an error, and constructs a new goja.Promise
 // which resolves to the specified value if err == nil, or is rejected with the

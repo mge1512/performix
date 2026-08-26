@@ -72,15 +72,7 @@ class FakeXdistNode:
 def selected_testcases_from_nodeids(manifest_tests: list[dict], nodeids: list[str]):
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = Path(tmpdir) / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "defaults": {"prerecord": {"mode": "launch"}},
-                    "tests": manifest_tests,
-                }
-            ),
-            encoding="utf-8",
-        )
+        manifest_path.write_text(json.dumps({"tests": manifest_tests}), encoding="utf-8")
         return conftest._selected_testcases_from_nodeids(
             FakeXdistConfig(manifest_path),
             nodeids,
@@ -93,7 +85,6 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
             "defaults": {
                 "modes": ["hackathon_mcp"],
                 "recipe": "code_hotspots",
-                "prerecord": {"mode": "launch"},
             },
             "tests": [
                 {
@@ -115,7 +106,7 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
 
     def test_iter_manifest_parameters_uses_requested_modes_for_each_testcase(self):
         manifest = {
-            "defaults": {"recipe": "code_hotspots", "prerecord": {"mode": "launch"}},
+            "defaults": {"recipe": "code_hotspots"},
             "tests": [
                 {
                     "id": "test_case_01",
@@ -130,7 +121,7 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
 
     def test_iter_manifest_parameters_selects_modes_supported_by_each_recipe(self):
         manifest = {
-            "defaults": {"recipe": "code_hotspots", "prerecord": {"mode": "launch"}},
+            "defaults": {"recipe": "code_hotspots"},
             "tests": [
                 {
                     "id": "test_case_01",
@@ -140,11 +131,6 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
                     "id": "test_case_32",
                     "acts": ["act2"],
                     "recipe": "system_utilization",
-                },
-                {
-                    "id": "test_case_41",
-                    "acts": ["act2"],
-                    "recipe": "syscall_trace_summary",
                 },
                 {
                     "id": "test_case_46",
@@ -165,7 +151,6 @@ class AiInsightsManifestSelectionTests(unittest.TestCase):
                 ("test_case_01", "code_hotspots", "hackathon_mcp"),
                 ("test_case_01", "code_hotspots", "performix_mcp"),
                 ("test_case_32", "system_utilization", "performix_mcp"),
-                ("test_case_41", "syscall_trace_summary", "performix_mcp"),
                 ("test_case_46", "cpu_microarchitecture", "performix_mcp"),
             ],
             [
@@ -314,7 +299,6 @@ class AiInsightsPreRecordedInputTests(unittest.TestCase):
             manifest_path.write_text(
                 json.dumps(
                     {
-                        "defaults": {"prerecord": {"mode": "launch"}},
                         "tests": [
                             {
                                 "id": "test_case_26",

@@ -12,12 +12,9 @@ import (
 )
 
 const (
-	ASCTRecipeName                 = "asct"
-	CacheSharingRecipeName         = "cache_sharing"
 	CodeHotspotsRecipeName         = "code_hotspots"
 	CPUMicroarchitectureRecipeName = "cpu_microarchitecture"
 	InstructionMixRecipeName       = "instruction_mix"
-	SyscallTraceSummaryRecipeName  = "syscall_trace_summary"
 	SystemUtilizationRecipeName    = "system_utilization"
 )
 
@@ -55,28 +52,11 @@ var systemUtilizationGuidance string
 //go:embed instruction_mix_run_query.md
 var instructionMixGuidance string
 
-//go:embed syscall_trace_summary_run_query.md
-var syscallTraceSummaryGuidance string
-
 //go:embed cpu_microarchitecture_run_query.md
 var cpuMicroarchitectureGuidance string
 
-//go:embed asct_run_query.md
-var asctGuidance string
-
-//go:embed cache_sharing_run_query.md
-var cacheSharingGuidance string
-
 // recipes is the allowlist of recipes supported by Dynamic Insights.
 var recipes = map[string]Recipe{
-	ASCTRecipeName: {
-		Method:   MethodRunQuery,
-		Guidance: runQueryGuidance + "\n\n" + asctGuidance,
-	},
-	CacheSharingRecipeName: {
-		Method:   MethodRunQuery,
-		Guidance: runQueryGuidance + "\n\n" + cacheSharingGuidance,
-	},
 	CodeHotspotsRecipeName: {
 		Method:   MethodCuratedSummary,
 		Guidance: codeHotspotsGuidance,
@@ -88,10 +68,6 @@ var recipes = map[string]Recipe{
 	InstructionMixRecipeName: {
 		Method:   MethodRunQuery,
 		Guidance: runQueryGuidance + "\n\n" + instructionMixGuidance,
-	},
-	SyscallTraceSummaryRecipeName: {
-		Method:   MethodRunQuery,
-		Guidance: runQueryGuidance + "\n\n" + syscallTraceSummaryGuidance,
 	},
 	SystemUtilizationRecipeName: {
 		Method:   MethodRunQuery,

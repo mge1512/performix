@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,12 +35,9 @@ class ResolveWorkloadsTests(unittest.TestCase):
         self.assertEqual(
             {row["recipe"] for row in matrix},
             {
-                "asct",
-                "cache_sharing",
                 "code_hotspots",
                 "cpu_microarchitecture",
                 "instruction_mix",
-                "syscall_trace_summary",
                 "system_utilization",
             },
         )
@@ -105,24 +101,6 @@ class ResolveWorkloadsTests(unittest.TestCase):
             ],
         )
 
-    def test_asct_uses_system_wide_execution(self) -> None:
-        result = self.run_resolver("--testcase", "test_case_53")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            json.loads(result.stdout),
-            [
-                {
-                    "id": "test_case_53",
-                    "workload": "",
-                    "recipe": "asct",
-                    "instance_type": "c8g.metal-24xl",
-                    "recipe_params": ["default_benchmarks=true"],
-                    "prerecord": {"mode": "system-wide"},
-                }
-            ],
-        )
-
     def test_cases_are_grouped_by_manifest_target(self) -> None:
         result = self.run_resolver(
             "--act", "act2", "--group-by-instance-type"
@@ -154,7 +132,6 @@ class ResolveWorkloadsTests(unittest.TestCase):
             "group: ${{ fromJson(needs.prepare-cases.outputs.groups) }}",
             workflow,
         )
-        self.assertIn("enable_spe: ${{ matrix.group.enable_spe }}", workflow)
         self.assertNotIn("inputs.instance_type", workflow)
         self.assertIn("dry_run: ${{ inputs.dry_run }}", workflow)
 
@@ -178,34 +155,6 @@ class ResolveWorkloadsTests(unittest.TestCase):
             self.assertFalse(
                 any(param.startswith("collect_all=") for param in params)
             )
-
-    def test_run_modification_is_forwarded_in_prerecord_config(self) -> None:
-        manifest = {
-            "defaults": {
-                "instance_type": "m8g.xlarge",
-                "prerecord": {"mode": "launch"},
-            },
-            "tests": [
-                {
-                    "id": "test_case_59",
-                    "recipe": "asct",
-                    "run_modification": "low_peak_bandwidth",
-                }
-            ],
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            manifest_path = Path(directory) / "manifest.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            result = self.run_resolver(
-                "--manifest", str(manifest_path), "--testcase", "test_case_59"
-            )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        case = json.loads(result.stdout)[0]
-        self.assertEqual(
-            case["prerecord"],
-            {"mode": "launch", "run_modification": "low_peak_bandwidth"},
-        )
 
     def test_missing_or_unknown_selection_is_rejected(self) -> None:
         for args, message in (

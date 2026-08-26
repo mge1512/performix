@@ -21,8 +21,7 @@ func TestAndroidPackageListToApapProto(t *testing.T) {
 	resp := androidPackageListToApapProto(&targetagentproto.AndroidPackageList{
 		Packages: []*targetagentproto.AndroidPackage{
 			{
-				Name:       "com.example.app",
-				Debuggable: boolPointer(true),
+				Name: "com.example.app",
 				Activities: []*targetagentproto.AndroidActivity{
 					{Name: "com.example.app.MainActivity"},
 					{Name: "com.example.app.SettingsActivity"},
@@ -33,18 +32,13 @@ func TestAndroidPackageListToApapProto(t *testing.T) {
 
 	assert.Equal(t, []*apapproto.AndroidPackage{
 		{
-			Name:       "com.example.app",
-			Debuggable: boolPointer(true),
+			Name: "com.example.app",
 			Activities: []*apapproto.AndroidActivity{
 				{Name: "com.example.app.MainActivity"},
 				{Name: "com.example.app.SettingsActivity"},
 			},
 		},
 	}, resp.Packages)
-}
-
-func boolPointer(value bool) *bool {
-	return &value
 }
 
 func TestListAndroidPackagesRejectsNonAndroidTarget(t *testing.T) {

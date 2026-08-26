@@ -16,7 +16,6 @@ import (
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/deploymentsupport"
 	"github.com/Arm-Debug/apap-cli/apap-engine/gojautils"
-	"github.com/Arm-Debug/apap-cli/apap-engine/jstest/mocks"
 	"github.com/Arm-Debug/apap-cli/apap-engine/tool"
 	tool_goja "github.com/Arm-Debug/apap-cli/apap-engine/tool/goja"
 	tool_mocks "github.com/Arm-Debug/apap-cli/apap-engine/tool/mocks"
@@ -74,7 +73,7 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 				onCancel: async (engine, ctx) => engine.log("cancel", ctx.params.value),
 			};
 		`)
-		engine := &mocks.MockToolEngine{}
+		engine := &MockToolEngine{}
 		toolContext := tool_goja.ToolContext{Params: map[string]any{"value": "a"}}
 		for _, stage := range []string{"probe", "run", "reformat", "stop", "cancel"} {
 			engine.On("Log", stage, "a").Return(nil).Once()
@@ -131,8 +130,8 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 				onCancel: () => {},
 			};
 		`)
-		engine := &mocks.MockToolEngine{}
-		hostEngine := &mocks.MockToolEngine{}
+		engine := &MockToolEngine{}
+		hostEngine := &MockToolEngine{}
 		engine.On("WithLocality", "host").Return(hostEngine, nil).Once()
 		hostEngine.On("GetLocality").Return("host", nil).Once()
 		hostEngine.On("Log", "info", "host").Return(nil).Once()
@@ -165,7 +164,7 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 				onCancel: () => {},
 			};
 		`)
-		engine := &mocks.MockToolEngine{}
+		engine := &MockToolEngine{}
 		engine.On("CreateTempDir").Return(harness.ToJSValPromise(t, "/tmp/mock", nil)).Once()
 
 		require.NoError(t, harness.ToolRun(t, engine, tool_goja.ToolContext{}))
@@ -186,7 +185,7 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 			};
 		`)
 
-		err := harness.ToolRun(t, &mocks.MockToolEngine{}, EmptyToolContext())
+		err := harness.ToolRun(t, &MockToolEngine{}, EmptyToolContext())
 
 		require.Error(t, err)
 		var scriptErr *gojautils.ScriptError
@@ -236,7 +235,7 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 			Metadata:   map[string]any{"value": "b"},
 		}
 
-		require.NoError(t, harness.ToolRun(t, &mocks.MockToolEngine{}, toolContext))
+		require.NoError(t, harness.ToolRun(t, &MockToolEngine{}, toolContext))
 	})
 
 	t.Run("converts complete probe result", func(t *testing.T) {
@@ -262,7 +261,7 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 			};
 		`)
 
-		result, err := harness.ToolProbe(t, &mocks.MockToolEngine{}, EmptyToolContext())
+		result, err := harness.ToolProbe(t, &MockToolEngine{}, EmptyToolContext())
 
 		require.NoError(t, err)
 		require.Equal(t, tool.ProbeResult{
@@ -290,7 +289,7 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 				onCancel: () => {},
 			};
 		`)
-		engine := &mocks.MockToolEngine{}
+		engine := &MockToolEngine{}
 		engine.On("CreateTempDir").Return(harness.ToJSValPromise(t, nil, errors.New("boom"))).Once()
 
 		err := harness.ToolRun(t, engine, EmptyToolContext())
@@ -327,7 +326,7 @@ func TestToolIntegrationJSHarness(t *testing.T) {
 			releaseOnce.Do(func() { close(release) })
 		}
 		t.Cleanup(releasePromise)
-		engine := &mocks.MockToolEngine{}
+		engine := &MockToolEngine{}
 		engine.On("CreateTempDir").
 			Return(harness.ToJSCustomPromise(t, func() (any, error) {
 				<-release
@@ -392,7 +391,7 @@ func TestToJSProcessHandle(t *testing.T) {
 			ExitCode int      `json:"exitCode"`
 		}
 
-		err := harness.CallAwaitWithDest(t, "inspectProcessHandle", &result, jsHandle)
+		err := harness.CallWithDest(t, "inspectProcessHandle", &result, jsHandle)
 
 		require.NoError(t, err)
 		require.Equal(t, 1, result.PID)
@@ -433,7 +432,7 @@ func TestToJSProcessHandleNoOptions(t *testing.T) {
 		handle.On("Stderr").Return(nil).Once()
 		jsHandle := harness.ToJSProcessHandleNoOptions(t, handle)
 
-		result, err := harness.CallAwait(t, "inspectProcessHandle", jsHandle)
+		result, err := harness.Call(t, "inspectProcessHandle", jsHandle)
 
 		require.NoError(t, err)
 		require.Equal(t, "stdin is not open for this process", result)

@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/Arm-Debug/apap-cli/apap-engine/jstest"
-	"github.com/Arm-Debug/apap-cli/apap-engine/jstest/mocks"
 	"github.com/Arm-Debug/apap-cli/apap-engine/message"
 	tool_goja "github.com/Arm-Debug/apap-cli/apap-engine/tool/goja"
 	tool_mocks "github.com/Arm-Debug/apap-cli/apap-engine/tool/mocks"
@@ -35,7 +34,7 @@ func TestLinuxPerfProbe(t *testing.T) {
 	t.Run("probe", func(t *testing.T) {
 		h := jstest.LoadToolIntegration(t, "linux_perf")
 
-		mockEngine := mocks.MockToolEngine{}
+		mockEngine := jstest.MockToolEngine{}
 		mockEngine.On("ExecCommand", []string{"perf", "--version"}, tool_goja.ExecOptions{}).
 			Return(h.ToJSValPromise(t, process.CommandResult{}, nil))
 		mockEngine.On("ExecCommand", []string{"python3", "--version"}, tool_goja.ExecOptions{}).
@@ -55,7 +54,7 @@ func TestLinuxPerfRun(t *testing.T) {
 	t.Run("fails if perfArgs param is not provided", func(t *testing.T) {
 		h := jstest.LoadToolIntegration(t, "linux_perf")
 
-		mockEngine := mocks.MockToolEngineIgnoreLogs()
+		mockEngine := jstest.MockToolEngineIgnoreLogs()
 		mockEngine.On("CreateTempDir").Return(h.ToJSValPromise(t, "/tmp/dir", nil))
 
 		ctx := jstest.EmptyToolContext()
@@ -66,7 +65,7 @@ func TestLinuxPerfRun(t *testing.T) {
 		h := jstest.LoadToolIntegration(t, "linux_perf")
 
 		tmpDir := "/tmp/dir"
-		mockEngine := mocks.MockToolEngineIgnoreLogs()
+		mockEngine := jstest.MockToolEngineIgnoreLogs()
 		mockEngine.On("CreateTempDir").Return(h.ToJSValPromise(t, tmpDir, nil))
 
 		ctx := jstest.EmptyToolContext()

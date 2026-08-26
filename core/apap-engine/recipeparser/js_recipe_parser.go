@@ -21,7 +21,6 @@ import (
 	"github.com/Arm-Debug/apap-cli/apap-engine/notifiers"
 	"github.com/Arm-Debug/apap-cli/apap-engine/parameters"
 	"github.com/Arm-Debug/apap-cli/apap-engine/recipe"
-	tool_goja "github.com/Arm-Debug/apap-cli/apap-engine/tool/goja"
 	"github.com/Arm-Debug/apap-cli/apap-engine/util"
 )
 
@@ -93,7 +92,7 @@ func (r *RecipeParserJS) ParseRecipe(sourceName string, content string) (recipe.
 	}
 
 	recipeOut := recipe.Recipe{}
-	recipe, err := ParseRecipeJS(r.vm, sourceName, content)
+	recipe, err := r.parseRecipeJS(sourceName, content)
 	if err != nil {
 		return recipeOut, err
 	}
@@ -104,17 +103,14 @@ func ParseInlineRecipe(parser RecipeParser, content string) (recipe.Recipe, erro
 	return parser.ParseRecipe("<inline-recipe>", content)
 }
 
-// ParseRecipeJS executes a recipe in vm and returns its raw JavaScript recipe
-// definition. Callers must only use vm from the goroutine that owns it.
-func ParseRecipeJS(vm *goja.Runtime, sourceName string, recipeFileData string) (Recipe, error) {
+// ParseRecipe takes the string representation of a file and returns the Recipe struct representation
+func (r *RecipeParserJS) parseRecipeJS(sourceName string, recipeFileData string) (Recipe, error) {
 	recipe := Recipe{}
-	// Map field names to their JSON tags where available
-	vm.SetFieldNameMapper(&tool_goja.JsonFieldNameMapper{})
 
-	if err := gojautils.SetPerformixGlobal(vm); err != nil {
+	if err := gojautils.SetPerformixGlobal(r.vm); err != nil {
 		return recipe, fmt.Errorf("setting Performix JS metadata: %w", err)
 	}
-	if err := setRecipeUtilsGlobal(vm); err != nil {
+	if err := setRecipeUtilsGlobal(r.vm); err != nil {
 		return recipe, fmt.Errorf("setting Performix recipe utilities: %w", err)
 	}
 
@@ -124,13 +120,13 @@ func ParseRecipeJS(vm *goja.Runtime, sourceName string, recipeFileData string) (
 		log.Debugf("unable to compile recipe: %v", err)
 		return recipe, err
 	}
-	_, err = vm.RunProgram(prog)
+	_, err = r.vm.RunProgram(prog)
 	if err != nil {
 		log.Debugf("unable to parse recipe: %v", err)
 		return recipe, err
 	}
 
-	jsValue := vm.Get("recipe")
+	jsValue := r.vm.Get("recipe")
 	if jsValue == nil {
 		err := fmt.Errorf("recipe not defined")
 		log.Debugf("unable to read recipe: %v", err)
@@ -245,7 +241,7 @@ func (r *RecipeParserJS) getRecipeProperties(recipeProperties Recipe) (recipe.Re
 	recipeOut.Description = recipeProperties.Description
 	recipeOut.MCPGuidance = recipeProperties.MCPGuidance
 	recipeOut.Version = recipeProperties.Version
-	status, err := recipe.ParseRecipeStatus(recipeProperties.Status)
+	status, err := parseRecipeStatus(recipeProperties)
 	if err != nil {
 		return recipe.Recipe{}, err
 	}
@@ -303,6 +299,10 @@ func (r *RecipeParserJS) getRecipeProperties(recipeProperties Recipe) (recipe.Re
 	}
 	recipeOut.ToolVersions = tv
 	return recipeOut, nil
+}
+
+func parseRecipeStatus(recipeProperties Recipe) (recipe.RecipeStatus, error) {
+	return recipe.ParseRecipeStatus(recipeProperties.Status)
 }
 
 // collectToolVersions examines each DeploymentDeclaration.Dependencies,

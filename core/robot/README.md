@@ -123,34 +123,6 @@ Note that `remote-localhost`-tagged tests will be skipped automatically if the r
 | Dry run a single suite (no execution) | `robot --dryrun --output NONE --log NONE --report NONE robot/tests/recipe/recipe.robot` |
 | Run without producing output files | `robot --output NONE --log NONE --report NONE --variable TARGET:<name> robot/tests` |
 
-## Continuous integration sharding
-
-The extended validation workflow runs independent parts of the Robot suite in parallel. Sharding is CI orchestration only; local `task core:test:robot` and `make robot-test` invocations remain single Robot runs unless you select suites or tags explicitly.
-
-The main [Robot Framework workflow](../../.github/workflows/robot-framework.yaml) uses two partition shapes to balance run times. Both shapes cover all eligible ordinary tests:
-
-| Host runner and target | Ordinary test partition | Additional coverage |
-| ---------------------- | ----------------------- | ------------------- |
-| Linux Arm64 host and provisioned Linux Arm64 target | `recipe` + `tool` + `non-recipe-non-tool` | Dedicated `remote-localhost` shard |
-| Linux x86-64 host and provisioned Linux Arm64 target | `recipe` + `non-recipe` | None |
-| Windows x86-64 host and provisioned Linux Arm64 target | `recipe` + `non-recipe` | None |
-| Linux Arm64 host and static Raspberry Pi target | Selected static subset | Manual workflow dispatches only |
-
-The ordinary suite assignments in each partition are exhaustive:
-
-- The `arm64` partition runs `robot/tests/recipe`, `robot/tests/tool`, and every other top-level suite in separate shards. It also runs the dedicated `remote-localhost` shard.
-- The `amd64` partition runs `robot/tests/recipe` separately; `non-recipe` includes every other top-level suite.
-
-[`.github/robot-sharding.json`](../../.github/robot-sharding.json) is the source of truth for shard partitions, host assignments, workload preparation, and static targets. Each provisioned-target shard lists its top-level test suites and whether it prepares workloads. Static targets list their selected suite files separately.
-
-Add every new top-level `robot/tests` directory to exactly one shard in each partition. Matrix generation fails before target provisioning if a suite is missing or duplicated.
-
-The separate [x86 target workflow](../../.github/workflows/robot-framework-x86.yaml) and [Windows on Arm workflow](../../.github/workflows/robot-framework-woa.yaml) remain single Robot jobs with platform-specific suite and tag exclusions.
-
-### Isolation requirements
-
-Each concurrent provisioned shard has its own runner and target. The workflow derives a unique artifact suffix from each matrix row. Robot results, engine logs, and exported runs use this suffix so results from parallel jobs do not collide.
-
 ## Workload-dependent tests (skipped by default if not set up)
 
 Some test suites (e.g. `jitdump.robot`) require workloads to be pre-installed on the target. The workloads are defined in `robot/resources/files/workloads/workloads.json` and downloaded as GitHub release assets from the `Arm-Debug/performix-workloads` repo. Requires `GITHUB_TOKEN` in the environment (a GitHub personal access token with read access to the `Arm-Debug` organisation).
