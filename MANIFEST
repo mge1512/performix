@@ -1,0 +1,28 @@
+Arm Performix: CMake replacement for the mise + go-task build layer.
+
+Unpack from the repository root:
+
+    tar -xzf performix-cmake.tar.gz --strip-components=1 -C /path/to/performix
+
+Files and their destinations, relative to the repository root:
+
+    CMakeLists.txt
+    cmake/PerformixGo.cmake
+    cmake/PerformixBundle.cmake
+    cmake/PerformixProto.cmake
+    cmake/scripts/performix_archive.cmake
+    core/CMakeLists.txt
+    core/apap-cli/CMakeLists.txt
+    core/apap-cli/tools-builtin/CMakeLists.txt
+    core/atperf-agent/CMakeLists.txt
+    docs/cmake-build.md
+
+Nothing in the existing tree is modified or removed. The Taskfiles, mise.toml
+and bootstrap still work; this is a parallel route.
+
+Build:
+
+    cmake -S . -B build
+    cmake --build build -j"$(nproc)"
+
+See docs/cmake-build.md for options, targets and known gaps.
